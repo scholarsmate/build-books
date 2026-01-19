@@ -108,8 +108,8 @@ A `ResultObject` is not mandatory, but it is a **pragmatic best practice** for d
 
 Rule of thumb:
 
-* If commands are simple one-offs, you can return exit codes directly.
-* If you expect growth, multiple outputs, or structured reporting, keep `ResultObject`.
+* If commands are simple one-offs, keep `ResultObject` minimal (or skip JSON output entirely).
+* If you expect growth, multiple outputs, or structured reporting, keep `ResultObject` and a stable event schema.
 
 ### Return codes and error signaling
 
@@ -123,7 +123,7 @@ Suggested convention:
 * `70`: internal software error (BSD `EX_SOFTWARE`) — reserved for bugs/unhandled exceptions
 * `130`: interrupted by Ctrl+C (SIGINT)
 
-**Enterprise rule:** plugins must **never** call `SystemExit` or manipulate process exit codes directly.
+Plugins must **never** call `SystemExit` or manipulate process exit codes directly.
 
 Implementation guidance:
 
@@ -144,26 +144,26 @@ Avoid doing heavy signal wiring in every plugin. Keep it in the stable entry poi
 
 Treat errors as part of the CLI API. Keep it consistent across all plugins.
 
-**Policy**
+#### Policy
 
 * **User/usage/config errors**: raise `click.ClickException("...")` (or `click.UsageError`) → **exit code 1**.
 * **Domain/environment/plugin failures**: record the failure in `results` via `results.fail(...)` → wrapper exits **2**.
 * **Bugs/unhandled exceptions**: wrapper catches, records `E_BUG_*`, exits **70**.
 * **Ctrl+C / SIGINT**: wrapper exits **130**.
 
-**Enterprise rule:** plugins must not call `SystemExit` (or `os._exit`). Only the wrapper decides process termination.
+Plugins must not call `SystemExit` (or `os._exit`). Only the wrapper decides process termination.
 
 ### Error code catalog (recommended)
 
 In addition to process exit codes, use **stable error codes** inside events so automation can reason about failures without scraping text.
 
-**Conventions**
+#### Conventions
 
 * Codes are **UPPER_SNAKE_CASE**.
 * Codes are stable once published.
 * Use **numeric codes** for easy aggregation/alerting, and keep the Enum name as the human/machine-readable identifier.
 
-### Enterprise-grade: define codes in one place
+### Define codes in one place
 
 Create a dedicated `errors.py` that defines an `IntEnum` catalog. `IntEnum` gives you:
 
@@ -221,7 +221,7 @@ This dual-layer approach (exit code + stable error catalog) gives you:
 
 Plugins should **never print**. They should only add structured events to `ResultObject`.
 
-**Policy**
+#### Policy
 
 * Plugins emit events: `results.add_event("kind", ...)`.
 * The wrapper renders events.
@@ -263,10 +263,6 @@ Example event:
   "details": {"path": "sample.txt"}
 }
 ```
-
----
-
----
 
 ---
 
@@ -501,11 +497,9 @@ def build_cli(prog_name: str = "mytool") -> click.Group:
             default = None if not has_default else p.default
 
             if ann is bool:
-                # mature bool UX: default False -> --flag, default True -> --no-flag
-                if has_default and default is True:
-                    opt = click.Option([f"--no-{p.name.replace('_','-')}"] , is_flag=True, default=False)
-                else:
-                    opt = click.Option([_flag(p.name)], is_flag=True, default=False)
+                # mature bool UX: --flag / --no-flag pairs with a clear default
+                flag = p.name.replace("_", "-")
+                opt = click.Option([f"--{flag}/--no-{flag}"], is_flag=True, default=(default if has_default else False), show_default=has_default)
                 cmd.params.insert(0, opt)
                 continue
 
@@ -543,7 +537,11 @@ def main(argv: list[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
     load_plugins("mytool.plugins")
     cli = build_cli("mytool")
-    cli.main(args=argv, prog_name="mytool", standalone_mode=True)
+    # standalone_mode=False returns instead of calling sys.exit; we exit ourselves.
+    try:
+        cli.main(args=argv, prog_name="mytool", standalone_mode=False)
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else (1 if e.code else 0)
     return 0
 ```
 
