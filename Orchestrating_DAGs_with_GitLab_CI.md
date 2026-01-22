@@ -15,12 +15,13 @@
 6. [Service Overlays: Decoupling Without Forking](#6-service-overlays-decoupling-without-forking)
 7. [The Orchestrator Pipeline](#7-the-orchestrator-pipeline)
 8. [Triggering Pipelines & Minimal UI](#8-triggering-pipelines--minimal-ui)
-9. [Security & Trust Model](#9-security--trust-model)
-10. [Variations & Extensions](#10-variations--extensions)
-11. [Tradeoffs & Limitations](#11-tradeoffs--limitations)
-12. [Reference Implementation Walkthrough (End-to-End Example)](#12-reference-implementation-walkthrough-end-to-end-example)
-13. [Appendix](#13-appendix)
-14. [License](#14-license)
+9. [Data Sharing, Collection, and Bundling](#9-data-sharing-collection-and-bundling)
+10. [Security & Trust Model](#10-security--trust-model)
+11. [Variations & Extensions](#11-variations--extensions)
+12. [Tradeoffs & Limitations](#12-tradeoffs--limitations)
+13. [Reference Implementation Walkthrough (End-to-End Example)](#13-reference-implementation-walkthrough-end-to-end-example)
+14. [Appendix](#14-appendix)
+15. [License](#15-license)
 
 ---
 
@@ -651,8 +652,8 @@ ORCHESTRATOR PIPELINE (P0)
    v
 
 BUS (artifact owner)
-   - inputs/
-   - services/<svc>/out/
+   - in/
+   - out/<svc>/
    - manifest.json
    - final/run-<id>.zip
 ```
@@ -808,24 +809,20 @@ Example layout:
 <bus-project>
   package: owo-runs
     version: <RUN_ID>
-      inputs/
+      in/
         # External inputs (if any) go here
-      services/
+      out/
         builder/
-          out/
-            service_meta.json
-            exe.bin
-            exe.sha256
+          service_meta.json
+          exe.bin
         metrics/
-          out/
-            service_meta.json
-            metrics.json
+          service_meta.json
+          metrics.json
         sandbox/
-          out/
-            service_meta.json
-            sandbox.json
-            stdout.txt
-            stderr.txt
+          service_meta.json
+          sandbox.json
+          stdout.txt
+          stderr.txt
       manifest.json
       final/
         run-<RUN_ID>.zip
@@ -1105,7 +1102,7 @@ A practical orchestrator pipeline can be expressed with a small set of stages:
 
 1. `kickoff` - generate Run ID, validate inputs
 2. `trigger` - trigger service overlay pipelines
-3. `collect` - download service job artifacts
+3. `collect` - download, validate and re-home service job artifacts
 4. `bundle` - create final bundle + manifest
 5. `gate` - evaluate results, apply policy
 6. `publish` - write canonical run record to the bus
@@ -1178,57 +1175,32 @@ Once services complete, the orchestrator collects their outputs.
 Mechanically, this usually means:
 
 * Downloading each service's job artifacts via the GitLab API
+* Validating the service outputs
 * Assembling a canonical directory tree in the orchestrator workspace
 
 Conceptually, the orchestrator turns many ephemeral outputs into one durable record.
+
+In practice, the collect stage typically consists of one gatherer job per service overlay, allowing artifact normalization to fan out in parallel.
 
 A typical canonical tree in the orchestrator workspace:
 
 ```text
 run/
-  inputs/
+  in/
     # External inputs go here (if any)
-  services/
-    builder/out/...
-    metrics/out/...
-    sandbox/out/...
+  out/
+    builder/...
+    metrics/...
+    sandbox/...
 ```
 
-Note: In the reference implementation, the `builder` service *produces* the binary, so `inputs/` may be empty. If your workflow accepts external files (e.g., user uploads), place them here.
+Note: In the reference implementation, the `builder` service *produces* the binary, so `in/` may be empty. If your workflow accepts external files (e.g., user uploads), place them here.
 
 This directory tree becomes the basis for both gating and publishing.
 
 ---
 
-### 7.5 Gate: Policy and Acceptance
-
-Gating is where you encode the definition of "good."
-
-Examples:
-
-* Sandbox exit code is zero
-* Output contains expected strings
-* Metrics thresholds are met
-* Virus scanning results are clean
-
-Gates should be:
-
-* Explicit
-* Deterministic
-* Recorded
-
-If a gate fails, the pipeline should fail.
-
-This is not just a "no." It is a signal to switch tracks.
-
-*   **Success:** Proceed to publish the certified run to the primary package (`owo-runs`).
-*   **Failure:** Divert the diagnostic artifacts to the quarantine package (`owo-runs-failed`).
-
-The gate is the traffic cop.
-
----
-
-### 7.6 Bundle: Produce the Run Package
+### 7.5 Bundle: Produce the Run Package
 
 Bundling is the step that makes the run convenient to:
 
@@ -1259,6 +1231,34 @@ The orchestrator is the right place to generate the manifest because it has the 
 
 ---
 
+### 7.6 Gate: Policy and Acceptance
+
+Gating is where you encode the definition of "good."
+
+Examples:
+
+* Sandbox exit code is zero
+* Output contains expected strings
+* Metrics thresholds are met
+* Virus scanning results are clean
+
+Gates should be:
+
+* Explicit
+* Deterministic
+* Recorded
+
+If a gate fails, the pipeline should fail.
+
+This is not just a "no." It is a signal to switch tracks.
+
+*   **Success:** Proceed to publish the certified run to the primary package (`owo-runs`).
+*   **Failure:** Divert the diagnostic artifacts to the quarantine package (`owo-runs-failed`).
+
+The gate is the traffic cop.
+
+---
+
 ### 7.7 Publish: Write to the Bus
 
 Publishing is where the run becomes permanent.
@@ -1277,8 +1277,8 @@ The orchestrator uploads artifacts to the bus's Generic Package Registry using a
 
 Recommended publish order:
 
-1. `inputs/*`
-2. `services/<svc>/out/*`
+1. `in/*`
+2. `out/<svc>/*`
 3. `manifest.json`
 4. `final/run-<RUN_ID>.zip`
 
@@ -1484,7 +1484,268 @@ If not, fix that first.
 
 ---
 
-## 9. Security & Trust Model
+## 9. Data Sharing, Collection, and Bundling
+
+This system treats **artifacts as the sole mechanism for inter-service data exchange**.
+
+No service reads another service’s workspace directly.
+No implicit shared state is assumed.
+No ad-hoc API calls are required for routine data flow.
+
+Everything that matters is made explicit, versioned, and auditable through artifacts.
+
+### 9.1 The `out/` Artifact Contract
+
+
+                         ┌──────────────────────────────┐
+                         │        Orchestrator          │
+                         │      (control plane)         │
+                         └─────────────┬────────────────┘
+                                       │
+                                       │ needs: artifacts:true
+                                       │
+        ┌──────────────────────────────▼──────────────────────────────┐
+        │                        Service Overlay                      │
+        │                                                             │
+        │   - runs pinned upstream                                    │
+        │   - performs real work                                      │
+        │                                                             │
+        │   Produces job artifacts:                                   │
+        │                                                             │
+        │     out/                                                    │
+        │       service_meta.json                                     │
+        │       <service outputs>                                     │
+        │                                                             │
+        └──────────────────────────────┬──────────────────────────────┘
+                                       │
+                                       │ artifacts materialized
+                                       │ (opaque payload)
+                                       │
+        ┌──────────────────────────────▼──────────────────────────────┐
+        │                         Gatherer Job                        │
+        │                      (orchestrator-owned)                   │
+        │                                                             │
+        │   - one gatherer job per service overlay                    │
+        │   - depends on exactly one upstream                         │
+        │   - validates artifacts are sane                            │
+        │                                                             │
+        │   Re-homes artifacts under a namespaced directory:          │
+        │                                                             │
+        │     out/                                                    │
+        │       <gather-dir>/  <─── entire upstream out/*             │
+        │                                                             │
+        │   (fails if out/<gather-dir> already exists)                │
+        │                                                             │
+        └──────────────────────────────┬──────────────────────────────┘
+                                       │
+                                       │ needs: artifacts:true
+                                       │
+        ┌──────────────────────────────▼──────────────────────────────┐
+        │                       Bundling Job                          │
+        │                                                             │
+        │   - depends on one or more gatherers                        │
+        │   - assembles canonical out/ tree                           │
+        │                                                             │
+        │   Writes:                                                   │
+        │     out/manifest.json                                       │
+        │                                                             │
+        │   Archives:                                                 │
+        │     out/**  →  final/run-<RUN_ID>.zip                       │
+        │                                                             │
+        └──────────────────────────────┬──────────────────────────────┘
+                                       │
+                                       │ needs: artifacts:true
+                                       │
+        ┌──────────────────────────────▼──────────────────────────────┐
+        │                          Gate Job                           │
+        │                                                             │
+        │   - evaluates policy                                        │
+        │   - inspects bundled artifacts                              │
+        │   - decides accept vs reject                                │
+        │                                                             │
+        │   (no artifact mutation)                                    │
+        │                                                             │
+        └──────────────────────────────┬──────────────────────────────┘
+                                       │
+                                       │ needs: artifacts:true
+                                       │
+        ┌──────────────────────────────▼──────────────────────────────┐
+        │                        Publish Job                          │
+        │                      (single-writer)                        │
+        │                                                             │
+        │   - runs only after gate decision                           │
+        │   - uploads bundle + manifest                               │
+        │   - targets success or quarantine package                   │
+        │                                                             │
+        └──────────────────────────────┬──────────────────────────────┘
+                                       │
+                                       │ publish
+                                       │
+                         ┌─────────────▼────────────────┐
+                         │             Bus              │
+                         │     (artifact ownership)     │
+                         │                              │
+                         │   - immutable run record     │
+                         │   - manifest + bundle        │
+                         │                              │
+                         └──────────────────────────────┘
+
+
+Every job that wishes to publish results **must write them under `out/`** and export `out/**` as job artifacts.
+
+This rule applies universally:
+
+* service overlays,
+* orchestrator jobs,
+* gatherers,
+* and final bundling steps.
+
+There are no exceptions and no alternate paths.
+
+If a downstream job needs data, that data must have existed in some upstream job’s `out/` directory.
+
+This single invariant keeps data flow:
+
+* visible,
+* debuggable,
+* cacheable,
+* and reproducible.
+
+### 9.2 Required Service Metadata
+
+Each service overlay **must include** a `out/service_meta.json` file in its artifacts.
+
+This file exists for auditability and traceability and is part of the service ABI. It allows downstream consumers and the orchestrator to answer questions like:
+
+* *Who produced this artifact?*
+* *From which repository and revision?*
+* *In which pipeline did it run?*
+
+The orchestrator does **not** interpret this metadata beyond basic validation. Its presence is required; its meaning belongs to humans and audit tooling.
+
+### 9.3 Artifact Propagation via `needs`
+
+Within a pipeline graph, jobs receive upstream artifacts explicitly via:
+
+* `needs:`
+* with `artifacts: true`
+
+This mechanism is used consistently to propagate `out/**` between jobs.
+
+When a job declares such a dependency:
+
+* upstream artifacts are materialized into the downstream job’s workspace,
+* under the same `out/` path they were exported from,
+* without renaming or transformation.
+
+At this stage, artifacts are treated as **opaque payloads**.
+
+### 9.4 Gatherer Jobs: Namespacing and Gating
+
+To safely combine artifacts from multiple upstream jobs, the orchestrator introduces **gatherer jobs**.
+
+A gatherer:
+
+* depends on exactly one upstream job,
+* receives that job’s `out/**`,
+* validates that the artifacts are sane,
+* and re-exports them under a **namespaced subdirectory** within its own `out/`.
+
+For example:
+
+* `out/built/**`
+* `out/metrics/**`
+* `out/source/**`
+
+The specific directory name is chosen by the gatherer and is **not required to match the producing service’s name**. Bundle layout is an orchestration concern; service identity remains encoded in `service_meta.json`.
+
+#### Collision Guard
+
+To prevent accidental overwrites, gatherers **must fail** if their target subdirectory already exists.
+
+This simple guard ensures:
+
+* artifact sets remain disjoint,
+* ordering mistakes fail fast,
+* and the pipeline never silently merges unrelated outputs.
+
+#### Validation Scope
+
+Gatherers are the natural choke point for validation and gating.
+
+Typical checks include:
+
+* presence and validity of `out/service_meta.json`,
+* existence of one or two expected outputs,
+* basic format checks (e.g., valid JSON, executable binary).
+
+These checks are intentionally shallow. They exist to catch structural errors, not to re-implement service logic.
+
+### 9.5 Downstream Consumption
+
+Downstream service overlays consume artifacts **exactly as they arrive**.
+
+By convention:
+
+* incoming artifacts appear under `out/`,
+* the receiving service may rename or relocate them into service-specific input directories (e.g., `in-source/`, `in-built/`),
+* and the service then produces its own outputs under a fresh `out/`.
+
+This keeps responsibility aligned:
+
+* producers publish,
+* consumers adapt,
+* the orchestrator does not guess.
+
+### 9.6 Final Bundling
+
+The final bundling job depends on one or more gatherers.
+
+At this point:
+
+* all artifact sets already live under disjoint subdirectories of `out/`,
+* no further renaming is required.
+
+The bundler:
+
+1. writes a `out/manifest.json` file at the root,
+2. archives `out/**` as a single bundle (e.g., `.7z`),
+3. publishes the bundle to the bus.
+
+This results in a stable, predictable bundle layout:
+
+```
+out/
+  manifest.json
+  built/
+    ...
+  metrics/
+    ...
+  source/
+    ...
+```
+
+The manifest serves as the top-level index; the directory structure reflects orchestration intent.
+
+### 9.7 Why This Works
+
+This model deliberately favors:
+
+* explicitness over convenience,
+* repetition over cleverness,
+* and contracts over convention-by-implication.
+
+By insisting that:
+
+* all data flows through `out/`,
+* all sharing is artifact-based,
+* and all aggregation is explicit,
+
+the system avoids hidden coupling while remaining easy to reason about under failure, re-runs, partial success, and audit.
+
+If this feels almost boring — good. Boring pipelines are the ones you can trust at 3 a.m.
+
+## 10. Security & Trust Model
 
 Security in this architecture is not an afterthought.
 
@@ -1494,7 +1755,7 @@ This section makes those constraints explicit.
 
 ---
 
-### 9.1 Threat Model (What We Care About)
+### 10.1 Threat Model (What We Care About)
 
 This build book assumes a realistic, not paranoid, threat model.
 
@@ -1514,7 +1775,7 @@ Those problems exist whether or not you use this architecture.
 
 ---
 
-### 9.2 Trust Is Not Transitive
+### 10.2 Trust Is Not Transitive
 
 A foundational rule:
 
@@ -1533,7 +1794,7 @@ This is enforced structurally, not socially.
 
 ---
 
-### 9.3 CI_JOB_TOKEN Allowlisting
+### 10.3 CI_JOB_TOKEN Allowlisting
 
 GitLab's `CI_JOB_TOKEN` is the linchpin of secure communication.
 
@@ -1552,7 +1813,7 @@ If a service pipeline is compromised, the damage stops there.
 
 ---
 
-### 9.4 Single-Writer Enforcement
+### 10.4 Single-Writer Enforcement
 
 The single-writer rule is enforced in two places:
 
@@ -1565,7 +1826,7 @@ If you ever feel tempted to relax this rule "just once," don't.
 
 ---
 
-### 9.5 Runner Isolation
+### 10.5 Runner Isolation
 
 Each service overlay can use:
 
@@ -1583,7 +1844,7 @@ Isolation is cheap compared to incident response.
 
 ---
 
-### 9.6 Artifact Integrity
+### 10.6 Artifact Integrity
 
 Artifacts are protected by:
 
@@ -1601,7 +1862,7 @@ This makes silent tampering difficult and obvious.
 
 ---
 
-### 9.7 Auditability
+### 10.7 Auditability
 
 Every run leaves behind:
 
@@ -1623,7 +1884,7 @@ It emerges naturally from the design.
 
 ---
 
-### 9.8 Failure Modes and Containment
+### 10.8 Failure Modes and Containment
 
 When something goes wrong:
 
@@ -1638,7 +1899,7 @@ This is intentional.
 
 ---
 
-### 9.9 The Security Posture in One Sentence
+### 10.9 The Security Posture in One Sentence
 
 If you trust GitLab CI to run your jobs, this architecture lets you:
 
@@ -1648,7 +1909,7 @@ That is the entire security story.
 
 ---
 
-## 10. Variations & Extensions
+## 11. Variations & Extensions
 
 One of the strengths of this architecture is that it is **composable**.
 
@@ -1658,7 +1919,7 @@ This section outlines common variations that preserve the model while adapting i
 
 ---
 
-### 10.1 Multiple Buses (Organizational Scaling)
+### 11.1 Multiple Buses (Organizational Scaling)
 
 Nothing in the orchestrator assumes a single bus.
 
@@ -1681,7 +1942,7 @@ This allows one orchestration engine to serve many organizations without shared 
 
 ---
 
-### 10.2 Partial DAGs and Optional Services
+### 11.2 Partial DAGs and Optional Services
 
 Not every run needs every service.
 
@@ -1701,7 +1962,7 @@ The key rule remains: skipped services do not produce artifacts.
 
 ---
 
-### 10.3 Fan-Out and Parallelism
+### 11.3 Fan-Out and Parallelism
 
 GitLab CI is very good at running pipelines in parallel.
 
@@ -1717,7 +1978,7 @@ The orchestrator waits; it does not micromanage.
 
 ---
 
-### 10.4 External Inputs and Pre-Existing Artifacts
+### 11.4 External Inputs and Pre-Existing Artifacts
 
 Inputs do not have to be built inside the DAG.
 
@@ -1737,7 +1998,7 @@ The model holds.
 
 ---
 
-### 10.5 Scheduled and Continuous Runs
+### 11.5 Scheduled and Continuous Runs
 
 Because everything lives in GitLab CI:
 
@@ -1749,7 +2010,7 @@ Scheduling is just another trigger.
 
 ---
 
-### 10.6 Windows, macOS, and Mixed Environments
+### 11.6 Windows, macOS, and Mixed Environments
 
 While containers are the default, they are not the only option.
 
@@ -1765,7 +2026,7 @@ Heterogeneous execution environments fit naturally into the model.
 
 ---
 
-### 10.7 External Consumers
+### 11.7 External Consumers
 
 The bus makes it easy to integrate with external systems:
 
@@ -1780,7 +2041,7 @@ They read from the bus.
 
 ---
 
-### 10.8 What Should *Not* Change
+### 11.8 What Should *Not* Change
 
 As you extend the system, resist changing these:
 
@@ -1793,7 +2054,7 @@ These constraints are what make the architecture predictable.
 
 Break them only if you fully understand the consequences.
 
-### 10.9 The Quarantine Pattern (Handling Failures)
+### 11.9 The Quarantine Pattern (Handling Failures)
 
 By default, if a run fails, the orchestrator publishes nothing. Use the **Quarantine Pattern** to save debug data without polluting the main record.
 
@@ -1821,7 +2082,7 @@ This keeps the main `owo-runs` package strictly for green, verified builds, whil
 
 ---
 
-## 11. Tradeoffs & Limitations
+## 12. Tradeoffs & Limitations
 
 No architecture is free.
 
@@ -1831,7 +2092,7 @@ Being honest here is what makes the rest of the document credible.
 
 ---
 
-### 11.1 YAML Is the Interface
+### 12.1 YAML Is the Interface
 
 This architecture is built on GitLab CI.
 
@@ -1851,7 +2112,7 @@ The tradeoff is that the interface is:
 
 ---
 
-### 11.2 No Dynamic DAG Mutation
+### 12.2 No Dynamic DAG Mutation
 
 The DAG is defined at pipeline creation time.
 
@@ -1867,7 +2128,7 @@ It is also what makes runs predictable and reviewable.
 
 ---
 
-### 11.3 Latency Over Throughput
+### 12.3 Latency Over Throughput
 
 GitLab CI pipelines are not low-latency systems.
 
@@ -1888,7 +2149,7 @@ If you need millisecond responsiveness, look elsewhere.
 
 ---
 
-### 11.4 Artifact Size and Volume
+### 12.4 Artifact Size and Volume
 
 Artifacts are first-class citizens here.
 
@@ -1904,7 +2165,7 @@ Plan accordingly.
 
 ---
 
-### 11.5 UI Is Functional, Not Magical
+### 12.5 UI Is Functional, Not Magical
 
 GitLab's pipeline UI is powerful, but it is not a bespoke workflow dashboard.
 
@@ -1924,7 +2185,7 @@ The upside is that you get all of this *without building it*.
 
 ---
 
-### 11.6 Operational Discipline Is Required
+### 12.6 Operational Discipline Is Required
 
 This architecture rewards discipline.
 
@@ -1941,7 +2202,7 @@ That constraint is the point.
 
 ---
 
-### 11.7 When This Is the Wrong Tool
+### 12.7 When This Is the Wrong Tool
 
 This pattern is probably not a good fit if:
 
@@ -1954,7 +2215,7 @@ Knowing when *not* to use a pattern is part of using it well.
 
 ---
 
-### 11.8 Why These Tradeoffs Are Acceptable
+### 12.8 Why These Tradeoffs Are Acceptable
 
 Every limitation listed above is the result of a deliberate choice.
 
@@ -1969,49 +2230,7 @@ If those matter to you, the tradeoffs are usually worth it.
 
 ---
 
-### 11.9 Implementation Detail: Inter-Service Data Passing
-
-A common question is: *"If services don't talk to each other, how does the Metrics service read the binary produced by the Builder?"*
-
-There is a "strict" way and a "pragmatic" way. This architecture uses the pragmatic approach: **Orchestrator-Mediated Peer Fetch**.
-
-Because the Orchestrator defines the DAG, it holds the context needed to bridge the gap.
-
-1.  **Orchestrator:** Triggers `builder`.
-2.  **Builder:** Completes successfully.
-3.  **Orchestrator:** Captures the `builder` pipeline ID (or uses the known downstream bridge job ID).
-4.  **Orchestrator:** Triggers `metrics`, passing a variable `UPSTREAM_SOURCE_PIPELINE=$BUILDER_PIPELINE_ID`.
-5.  **Metrics:** Uses `CI_JOB_TOKEN` to fetch the specific artifact from the `builder` project via the GitLab API.
-
-Concrete API sketch (simplified):
-
-* List jobs in the upstream pipeline:
-
-```sh
-curl --fail \
-  --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-  "$CI_API_V4_URL/projects/$BUILDER_PROJECT_ID/pipelines/$UPSTREAM_SOURCE_PIPELINE/jobs"
-```
-
-* Pick the job that produces artifacts (by name), capture its `id` as `BUILDER_JOB_ID`, then download artifacts:
-
-```sh
-curl --fail \
-  --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-  --output builder_artifacts.zip \
-  "$CI_API_V4_URL/projects/$BUILDER_PROJECT_ID/jobs/$BUILDER_JOB_ID/artifacts"
-```
-
-Important trust note: this "peer fetch" requires the upstream service project to allow `CI_JOB_TOKEN` read access from the downstream service project. If you want to preserve the strictest isolation model, prefer having the orchestrator re-host the required input into `run/inputs/` (and/or the bus) and pass only bus coordinates to downstream services.
-
-This pattern maintains isolation because:
-*   The connection is ephemeral (only lasts for the job).
-*   The pointer is explicit (provided by the orchestrator).
-*   The access is **read-only**.
-
-The strict rule "Services never talk" is practically interpreted as: *"Services never initiate connections to other services on their own authority."* Using an orchestrator-provided handle to read a specific immutable artifact is permissible.
-
-## 12. Reference Implementation Walkthrough (End-to-End Example)
+## 13. Reference Implementation Walkthrough (End-to-End Example)
 
 This section walks through the minimal working reference implementation ("owo") end-to-end.
 
@@ -2031,7 +2250,7 @@ We'll keep the example intentionally small:
 
 ---
 
-### 12.1 Repos in the reference implementation
+### 13.1 Repos in the reference implementation
 
 At minimum, you will have these GitLab projects (names are illustrative):
 
@@ -2045,7 +2264,7 @@ In the reference implementation you built, each service is a standalone GitLab p
 
 ---
 
-### 12.2 Run Inputs and Variables
+### 13.2 Run Inputs and Variables
 
 For the reference implementation, the orchestrator needs only a few inputs.
 
@@ -2063,7 +2282,7 @@ A good kickoff job validates that the required variables are present and writes 
 
 ---
 
-### 12.3 Orchestrator Pipeline (Conceptual)
+### 13.3 Orchestrator Pipeline (Conceptual)
 
 The orchestrator expresses the DAG with `trigger` jobs using `strategy: depend`.
 
@@ -2084,7 +2303,7 @@ In your reference implementation, you already have kickoff + service triggers + 
 
 ---
 
-### 12.4 Service Contract: What Each Service Must Produce
+### 13.4 Service Contract: What Each Service Must Produce
 
 Each service pipeline must emit job artifacts under `out/`.
 
@@ -2113,7 +2332,7 @@ This is what allows the orchestrator to remain dumb and stable.
 
 ---
 
-### 12.5 Marshaling: How the Orchestrator Collects Results
+### 13.5 Marshaling: How the Orchestrator Collects Results
 
 After each triggered pipeline completes, the orchestrator downloads the child pipeline's job artifacts and assembles a canonical directory tree.
 
@@ -2121,15 +2340,12 @@ Recommended canonical tree inside the orchestrator job workspace:
 
 ```text
 run/
-  inputs/
+  in/
     # (External inputs, if any. Empty in this example)
-  services/
-    builder/
-      out/...
-    metrics/
-      out/...
-    sandbox/
-      out/...
+  out/
+    builder/...
+    metrics/...
+    sandbox/...
 ```
 
 This is the directory tree you:
@@ -2140,7 +2356,7 @@ This is the directory tree you:
 
 ---
 
-### 12.6 Gates (The Reference Implementation Acceptance Criteria)
+### 13.6 Gates (The Reference Implementation Acceptance Criteria)
 
 For the simplest "hello world" executable, the gates can be:
 
@@ -2160,7 +2376,7 @@ No partial "success."
 
 ---
 
-### 12.7 Publishing to the Bus (Generic Package Registry)
+### 13.7 Publishing to the Bus (Generic Package Registry)
 
 Publishing means uploading files to the bus project's Generic Package Registry.
 
@@ -2172,8 +2388,8 @@ The package coordinates:
 
 Recommended publish order:
 
-1. `inputs/*`
-2. `services/<svc>/out/*`
+1. `in/*`
+2. `out/<svc>/*`
 3. `manifest.json`
 4. `final/run-<RUN_ID>.zip`
 
@@ -2181,7 +2397,7 @@ This produces a durable, scriptable run record.
 
 ---
 
-### 12.8 Where to See and Download Artifacts
+### 13.8 Where to See and Download Artifacts
 
 There are two "artifact worlds" in GitLab:
 
@@ -2204,7 +2420,7 @@ This is the portable, shareable bundle.
 
 ---
 
-### 12.9 Triggering the Run
+### 13.9 Triggering the Run
 
 For the reference implementation, the simplest approach is:
 
@@ -2218,7 +2434,7 @@ This avoids commits purely to start a run, and preserves a clean audit trail.
 
 ---
 
-### 12.10 Debugging the Reference Implementation: The Three Most Common Foot-Guns
+### 13.10 Debugging the Reference Implementation: The Three Most Common Foot-Guns
 
 These came up naturally during the reference implementation bring-up.
 
@@ -2265,7 +2481,7 @@ If the pipeline graph shows it was orchestrator-triggered but values are empty, 
 
 ---
 
-### 12.11 What "Good" Looks Like
+### 13.11 What "Good" Looks Like
 
 A successful run produces:
 
@@ -2281,7 +2497,7 @@ At that point, you have demonstrated the core promise of this architecture:
 
 ---
 
-### 12.12 Copy/Paste Variable Set (Run Pipeline UI)
+### 13.12 Copy/Paste Variable Set (Run Pipeline UI)
 
 For the reference implementation, you should be able to kick off a run **without committing anything**.
 
@@ -2306,7 +2522,7 @@ If any required variable is missing, the **kickoff job should fail fast** with a
 
 ---
 
-### 12.13 `manifest.json` Schema (Reference Implementation)
+### 13.13 `manifest.json` Schema (Reference Implementation)
 
 Every successful run should emit a machine-readable manifest.
 
@@ -2344,9 +2560,22 @@ Minimal reference implementation schema:
   },
   "artifacts": {
     "inputs": [],
-    "builder": ["exe.bin", "exe.sha256"],
-    "metrics": ["metrics.json"],
-    "sandbox": ["sandbox.json", "stdout.txt", "stderr.txt"],
+    "outputs": {
+      "builder": [
+        {"file": "service_meta.json", "hash": "SHA256:1aab..."},
+        {"file": "exe.bin", "hash": "SHA256:12ab.."},
+      ],
+      "metrics": [
+        {"file": "service_meta.json", "hash": "SHA256:a4cb..."},
+        {"file": "metrics.json", "hash": "SHA512:de0d..."},
+      ],
+      "sandbox": [
+        {"file": "service_meta.json", "hash": "SHA256:34ba..."},
+        {"file": "sandbox.json", "hash": "SHA512:42de..."},
+        {"file": "stdout.txt", "hash": "SHA512:791e..."},
+        {"file": "stderr.txt", "hash": "SHA512:0b9f..."},
+      ]
+    },
     "bundle": "final/run-<uuid>.zip"
   }
 }
@@ -2362,13 +2591,13 @@ If you lose GitLab tomorrow, the manifest still explains the run.
 
 ---
 
-## 13. Appendix
+## 14. Appendix
 
 This appendix collects reference material, conventions, and lookup tables that support the main text without interrupting its flow.
 
 ---
 
-### 13.1 Glossary
+### 14.1 Glossary
 
 **Orchestrator**
 The central GitLab project that defines the DAG and coordinates execution across services.
@@ -2390,16 +2619,17 @@ Directed Acyclic Graph describing execution order and dependencies.
 
 ---
 
-### 13.2 Canonical Directory Layout (Run Workspace)
+### 14.2 Canonical Directory Layout (Run Workspace)
 
 Inside the orchestrator job workspace, the recommended structure is:
 
 ```text
 run/
-  inputs/
-  services/
-    <service-name>/
-      out/
+  in/
+  out/
+    <svc>/
+      service_meta.json
+      ...
   final/
     run-<RUN_ID>.zip
   manifest.json
@@ -2409,7 +2639,7 @@ This structure is intentionally boring and predictable.
 
 ---
 
-### 13.3 Common CI Variables
+### 14.3 Common CI Variables
 
 | Variable             | Purpose                                  |
 | -------------------- | ---------------------------------------- |
@@ -2421,7 +2651,7 @@ This structure is intentionally boring and predictable.
 
 ---
 
-### 13.4 Minimal Kickoff Job (Reference)
+### 14.4 Minimal Kickoff Job (Reference)
 
 ```yaml
 kickoff:
@@ -2438,7 +2668,7 @@ kickoff:
 
 ---
 
-### 13.5 Minimal Trigger Job (Reference)
+### 14.5 Minimal Trigger Job (Reference)
 
 ```yaml
 trigger_builder:
@@ -2458,7 +2688,7 @@ trigger_builder:
 
 ---
 
-### 13.6 Minimal Bus Publish (Reference)
+### 14.6 Minimal Bus Publish (Reference)
 
 The publish stage uses **two jobs** to route artifacts based on pipeline status.
 
@@ -2499,7 +2729,7 @@ publish_failed:
 
 ---
 
-### 13.7 Failure Modes Cheat Sheet
+### 14.7 Failure Modes Cheat Sheet
 
 | Symptom           | Likely Cause                    |
 | ----------------- | ------------------------------- |
@@ -2510,7 +2740,7 @@ publish_failed:
 
 ---
 
-### 13.8 Versioning the Build Book
+### 14.8 Versioning the Build Book
 
 This document should be versioned.
 
@@ -2526,7 +2756,7 @@ The details will evolve.
 
 ---
 
-### 13.9 Format Selection Decision Tree (YAML vs JSON vs XML)
+### 14.9 Format Selection Decision Tree (YAML vs JSON vs XML)
 
 When you're deciding what format a file should be, start by asking: is this file expressing **intent** (configuration) or preserving **evidence** (outputs/results)?
 
@@ -2556,7 +2786,7 @@ One practical warning: YAML is powerful enough to be ambiguous across implementa
 
 ---
 
-## 14. License
+## 15. License
 
 Copyright (c) 2026 Omega Development
 
