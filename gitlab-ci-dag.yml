@@ -13,7 +13,7 @@ kickoff:
     - export RUN_ID=$(uuidgen)
     - echo "RUN_ID=$RUN_ID" > run.env
     - echo "OWO_BUS_PROJECT_ID=${OWO_BUS_PROJECT_ID:-bus-prod}" >> run.env
-    - echo "OWO_BUS_FAIL_PROJECT_ID=${OWO_BUS_FAIL_PROJECT_ID:-${OWO_BUS_PROJECT_ID}-fail}" >> run.env
+    - echo "OWO_BUS_FAIL_PROJECT_ID=${OWO_BUS_FAIL_PROJECT_ID:-${OWO_BUS_PROJECT_ID:-bus-prod}-fail}" >> run.env
     - echo "OWO_BUS_PACKAGE=$OWO_BUS_PACKAGE" >> run.env
     - echo "BUILDER_REF=${BUILDER_REF:-main}" >> run.env
     - echo "METRICS_REF=${METRICS_REF:-main}" >> run.env
