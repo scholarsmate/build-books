@@ -1,0 +1,118 @@
+# Example reference implementation
+stages:
+  - kickoff
+  - trigger
+  - collect
+  - bundle
+  - gate
+  - publish
+
+kickoff:
+  stage: kickoff
+  script:
+    - export RUN_ID=$(uuidgen)
+    - echo "RUN_ID=$RUN_ID" > run.env
+    - echo "OWO_BUS_PROJECT_ID=${OWO_BUS_PROJECT_ID:-bus-prod}" >> run.env
+    - echo "OWO_BUS_FAIL_PROJECT_ID=${OWO_BUS_FAIL_PROJECT_ID:-${OWO_BUS_PROJECT_ID}-fail}" >> run.env
+    - echo "OWO_BUS_PACKAGE=$OWO_BUS_PACKAGE" >> run.env
+  artifacts:
+    reports:
+      dotenv: run.env
+    expire_in: 1 day  # Retain artifacts for 1 day
+
+trigger_builder:
+  stage: trigger
+  needs:
+    - job: kickoff
+      artifacts: true
+  trigger:
+    project: ARGH/Reference-Implementation/Builder
+    branch: $BUILDER_REF
+    strategy: depend
+  variables:
+    RUN_ID: $RUN_ID
+    OWO_BUS_PROJECT_ID: $OWO_BUS_PROJECT_ID
+    OWO_BUS_PACKAGE: $OWO_BUS_PACKAGE
+
+collect_builder:
+  stage: collect
+  needs:
+    - job: trigger_builder
+      artifacts: true
+  script:
+    - mv out in
+    - mkdir -p out
+    - mv in out/built
+  artifacts:
+    paths:
+      - out/**
+    expire_in: 1 day
+
+bundle:
+  stage: bundle
+  needs:
+    - job: collect_builder
+      artifacts: true
+  script:
+    - echo '{"run_id": "'$RUN_ID'", "status": "success"}' > out/manifest.json
+    - pushd out && zip -r ../run-${RUN_ID}.zip . && popd
+    - mkdir -p out/final && mv run-${RUN_ID}.zip out/final
+  artifacts:
+    paths:
+      - out/**
+    expire_in: 1 day
+
+gate:
+  stage: gate
+  needs:
+    - job: bundle
+      artifacts: true
+  script:
+    - test "$(jq -r .status out/manifest.json)" = "success"
+    - echo "Gate passed!"
+  artifacts:
+    paths:
+      - out/**
+    expire_in: 1 day
+
+publish_success:
+  stage: publish
+  needs:
+    - job: gate
+      artifacts: true
+  script:
+    - |
+      for file in out/final/*; do
+        if [ -f "$file" ]; then
+          filename=$(basename "$file")
+          curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$file" \
+            "$CI_API_V4_URL/projects/$OWO_BUS_PROJECT_ID/packages/generic/$OWO_BUS_PACKAGE/$RUN_ID/$filename" || exit 1
+          echo "Uploaded: $filename"
+        fi
+      done
+  when: on_success
+  artifacts:
+    paths:
+      - out/**
+    expire_in: 1 day
+
+publish_failed:
+  stage: publish
+  needs:
+    - job: gate
+      artifacts: true
+  script:
+    - |
+      for file in out/final/*; do
+        if [ -f "$file" ]; then
+          filename=$(basename "$file")
+          curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$file" \
+            "$CI_API_V4_URL/projects/$OWO_BUS_FAIL_PROJECT_ID/packages/generic/${OWO_BUS_PACKAGE}-fail/$RUN_ID/$filename" || exit 1
+          echo "Uploaded: $filename"
+        fi
+      done
+  when: on_failure
+  artifacts:
+    paths:
+      - out/**
+    expire_in: 1 week  # Retain artifacts for 1 week for failed pipelines
