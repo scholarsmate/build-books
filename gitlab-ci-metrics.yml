@@ -38,13 +38,15 @@ publish:
         --arg repository_url "$CI_PROJECT_URL" \
         --arg commit_sha "$CI_COMMIT_SHA" \
         --arg pipeline_url "$CI_PIPELINE_URL" \
+        --arg status "success" \
         --arg run_id "$RUN_ID" \
         '{
           service_name: $service_name,
           repository_url: $repository_url,
           commit_sha: $commit_sha,
           pipeline_url: $pipeline_url,
-          run_id: $run_id
+          run_id: $run_id,
+          status: $status
         }' > out/service_meta.json
     - echo "Metadata published successfully."
   artifacts:
