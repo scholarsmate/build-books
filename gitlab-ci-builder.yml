@@ -1,0 +1,56 @@
+# Builder CI pipeline
+stages:
+  - build
+  - validate
+  - publish
+
+build:
+  stage: build
+  script:
+    - mkdir -p out
+    - echo "Building executable..."
+    - echo "Hello, world!" > out/exe.bin
+    - sha256sum out/exe.bin | awk '{print $1}' > out/exe.sha256
+    - echo "Executable built successfully."
+  artifacts:
+    paths:
+      - out/**
+    expire_in: 1 day  # Retain artifacts for 1 day
+
+validate:
+  stage: validate
+  needs:
+    - job: build
+      artifacts: true
+  script:
+    - echo "Validating executable..."
+    - test -f out/exe.bin || (echo "Executable not found!" && exit 1)
+    - test -f out/exe.sha256 || (echo "SHA256 checksum not found!" && exit 1)
+    - echo "Validation passed."
+
+publish:
+  stage: publish
+  needs:
+    - job: validate
+      artifacts: true
+  script:
+    - echo "Publishing metadata..."
+    - mkdir -p out
+    - jq -n \
+        --arg service_name "Builder" \
+        --arg repository_url "$CI_PROJECT_URL" \
+        --arg commit_sha "$CI_COMMIT_SHA" \
+        --arg pipeline_url "$CI_PIPELINE_URL" \
+        --arg run_id "$RUN_ID" \
+        '{
+          service_name: $service_name,
+          repository_url: $repository_url,
+          commit_sha: $commit_sha,
+          pipeline_url: $pipeline_url,
+          run_id: $run_id
+        }' > out/service_meta.json
+    - echo "Metadata published successfully."
+  artifacts:
+    paths:
+      - out/**
+    expire_in: 1 day  # Retain artifacts for 1 day
