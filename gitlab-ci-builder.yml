@@ -15,6 +15,7 @@ build:
   artifacts:
     paths:
       - out/**
+    when: always
     expire_in: 1 day
 
 validate:
@@ -30,6 +31,7 @@ validate:
   artifacts:
     paths:
       - out/**
+    when: always
     expire_in: 1 day
 
 publish:
@@ -58,4 +60,5 @@ publish:
   artifacts:
     paths:
       - out/**
+    when: always
     expire_in: 1 day
