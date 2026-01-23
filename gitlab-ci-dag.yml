@@ -15,6 +15,8 @@ kickoff:
     - echo "OWO_BUS_PROJECT_ID=${OWO_BUS_PROJECT_ID:-bus-prod}" >> run.env
     - echo "OWO_BUS_FAIL_PROJECT_ID=${OWO_BUS_FAIL_PROJECT_ID:-${OWO_BUS_PROJECT_ID}-fail}" >> run.env
     - echo "OWO_BUS_PACKAGE=$OWO_BUS_PACKAGE" >> run.env
+    - echo "BUILDER_REF=${BUILDER_REF:-main}" >> run.env
+    - echo "METRICS_REF=${METRICS_REF:-main}" >> run.env
   artifacts:
     reports:
       dotenv: run.env
@@ -31,8 +33,24 @@ trigger_builder:
     strategy: depend
   variables:
     RUN_ID: $RUN_ID
-    OWO_BUS_PROJECT_ID: $OWO_BUS_PROJECT_ID
-    OWO_BUS_PACKAGE: $OWO_BUS_PACKAGE
+  artifacts:
+    paths:
+      - out/**
+
+trigger_metrics:
+  stage: trigger
+  needs:
+    - job: trigger_builder
+      artifacts: true
+  trigger:
+    project: ARGH/Reference-Implementation/Metrics
+    branch: $METRICS_REF
+    strategy: depend
+  variables:
+    RUN_ID: $RUN_ID
+  artifacts:
+    paths:
+      - out/**
 
 collect_builder:
   stage: collect
@@ -42,7 +60,23 @@ collect_builder:
   script:
     - mv out in
     - mkdir -p out
+    - test -f in/service_meta.json || (echo "Error: service_meta.json not found!" && exit 1)
     - mv in out/built
+  artifacts:
+    paths:
+      - out/**
+    expire_in: 1 day
+
+collect_metrics:
+  stage: collect
+  needs:
+    - job: trigger_metrics
+      artifacts: true
+  script:
+    - mv out in
+    - mkdir -p out
+    - test -f in/service_meta.json || (echo "Error: service_meta.json not found!" && exit 1)
+    - mv in out/metrics
   artifacts:
     paths:
       - out/**
@@ -52,6 +86,8 @@ bundle:
   stage: bundle
   needs:
     - job: collect_builder
+      artifacts: true
+    - job: collect_metrics
       artifacts: true
   script:
     - echo '{"run_id": "'$RUN_ID'", "status": "success"}' > out/manifest.json
@@ -68,7 +104,7 @@ gate:
     - job: bundle
       artifacts: true
   script:
-    - test "$(jq -r .status out/manifest.json)" = "success"
+    - test "$(jq -r .status out/manifest.json)" = "success" || (echo "Error: Gate failed due to non-success status!" && exit 1)
     - echo "Gate passed!"
   artifacts:
     paths:
