@@ -1,0 +1,49 @@
+# Metrics CI pipeline
+stages:
+  - analyze
+  - publish
+
+analyze:
+  stage: analyze
+  script:
+    - echo "Analyzing artifacts..."
+    - file_type=$(file -b out/exe.bin)
+    - file_size=$(stat -c%s out/exe.bin)
+    - jq -n \
+        --arg file_type "$file_type" \
+        --arg file_size "$file_size" \
+        '{
+          file_type: $file_type,
+          file_size: $file_size
+        }' > out/metrics.json
+    - echo "Analysis complete. Metrics written to out/metrics.json."
+  artifacts:
+    paths:
+      - out/**
+    expire_in: 1 day
+
+publish:
+  stage: publish
+  needs:
+    - job: analyze
+      artifacts: true
+  script:
+    - echo "Publishing metadata..."
+    - jq -n \
+        --arg service_name "Metrics" \
+        --arg repository_url "$CI_PROJECT_URL" \
+        --arg commit_sha "$CI_COMMIT_SHA" \
+        --arg pipeline_url "$CI_PIPELINE_URL" \
+        --arg run_id "$RUN_ID" \
+        '{
+          service_name: $service_name,
+          repository_url: $repository_url,
+          commit_sha: $commit_sha,
+          pipeline_url: $pipeline_url,
+          run_id: $run_id
+        }' > out/service_meta.json
+    - echo "Metadata published successfully."
+  artifacts:
+    paths:
+      - out/**
+    expire_in: 1 day
