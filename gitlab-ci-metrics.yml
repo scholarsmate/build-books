@@ -6,9 +6,12 @@ stages:
 analyze:
   stage: analyze
   script:
+    - mv out in && mkdir -p out
     - echo "Analyzing artifacts..."
-    - file_type=$(file -b out/exe.bin)
-    - file_size=$(stat -c%s out/exe.bin)
+    - built_file=$(jq -r .built_file in/service_meta.json)
+    - test -f "in/$built_file" || (echo "Error: Built file $built_file not found!" && exit 1)
+    - file_type=$(file -b "in/$built_file")
+    - file_size=$(stat -c%s "in/$built_file")
     - jq -n \
         --arg file_type "$file_type" \
         --arg file_size "$file_size" \
