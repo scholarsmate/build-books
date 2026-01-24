@@ -17,7 +17,7 @@
 # Notes:
 # - This is not a hardened sandbox. It is an execution harness intended to make execution
 #   deliberate and auditable, and to support gating.
-# - Ensure the runner image includes: curl, unzip, jq, bash (or sh).
+# - Ensure the runner image includes: curl, unzip, jq, bash.
 stages:
   - sandbox
   - publish
