@@ -29,7 +29,6 @@ build:
 
       echo "Building executable..."
       cat > out/exe.bin <<'EOF'
-      #!/usr/bin/env bash
       set -e
       echo "Hello, world!"
       EOF
