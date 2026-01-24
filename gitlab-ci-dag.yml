@@ -406,6 +406,8 @@ collect_scanner:
 bundle:
   stage: bundle
   needs:
+    - job: kickoff
+      artifacts: true
     - job: collect_builder
       artifacts: true
     - job: collect_metrics
@@ -467,6 +469,8 @@ gate:
 publish_success:
   stage: publish
   needs:
+    - job: kickoff
+      artifacts: true
     - job: gate
       artifacts: true
   script:
@@ -491,6 +495,8 @@ publish_success:
 publish_failed:
   stage: publish
   needs:
+    - job: kickoff
+      artifacts: true
     - job: bundle
       artifacts: true
   script:

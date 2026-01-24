@@ -24,6 +24,7 @@ analyze:
   script:
     - |
       set -e
+      test -n "${RUN_ID:-}" || (echo "Error: RUN_ID is required" && exit 1)
       test -n "${BUILDER_PROJECT_ID:-}" || (echo "Error: BUILDER_PROJECT_ID is required" && exit 1)
       test -n "${BUILDER_JOB_ID:-}" || (echo "Error: BUILDER_JOB_ID is required" && exit 1)
 

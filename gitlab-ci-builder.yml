@@ -23,6 +23,8 @@ build:
   stage: build
   script:
     - |
+      set -e
+      test -n "${RUN_ID:-}" || (echo "Error: RUN_ID is required" && exit 1)
       mkdir -p out
 
       echo "Building executable..."

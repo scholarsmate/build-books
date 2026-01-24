@@ -263,7 +263,7 @@ Over:
 * Implicit discovery
 * Hidden control flow
 
-The result is more YAML--but YAML that is explcit and easily understood.
+The result is more YAML--but YAML that is explicit and easily understood.
 
 ---
 
