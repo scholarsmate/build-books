@@ -425,10 +425,11 @@ bundle:
       rm -rf out/final || true
       mkdir -p out/final
 
-      pushd out
-      echo "Creating encrypted bundle (7z; password=RUN_ID)..."
-      7z a -t7z "../run-${RUN_ID}.7z" . -xr!final -mx=9 -mhe=on -p"$RUN_ID"
-      popd
+      (
+        cd out
+        echo "Creating encrypted bundle (7z; password=RUN_ID)..."
+        7z a -t7z "../run-${RUN_ID}.7z" . -xr!final -mx=9 -mhe=on -p"$RUN_ID"
+      )
 
       mv run-${RUN_ID}.7z out/final/
   artifacts:
