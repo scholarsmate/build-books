@@ -1,0 +1,133 @@
+# Sandbox CI pipeline (execute payload)
+#
+# This service overlay pulls the built artifact from the Builder overlay artifacts and executes
+# it in a minimal "sandbox" job, capturing stdout/stderr and exit code.
+#
+# Required variables:
+# - RUN_ID
+# - BUILDER_PROJECT_ID
+# - BUILDER_JOB_ID
+#
+# Outputs (artifacts):
+# - out/stdout.txt
+# - out/stderr.txt
+# - out/sandbox.json
+# - out/service_meta.json
+#
+# Notes:
+# - This is not a hardened sandbox. It is an execution harness intended to make execution
+#   deliberate and auditable, and to support gating.
+# - Ensure the runner image includes: curl, unzip, jq, bash (or sh).
+stages:
+  - sandbox
+  - publish
+
+sandbox:
+  stage: sandbox
+  script:
+    - |
+      set -e
+      test -n "${RUN_ID:-}" || (echo "Error: RUN_ID is required" && exit 1)
+      test -n "${BUILDER_PROJECT_ID:-}" || (echo "Error: BUILDER_PROJECT_ID is required" && exit 1)
+      test -n "${BUILDER_JOB_ID:-}" || (echo "Error: BUILDER_JOB_ID is required" && exit 1)
+
+      rm -rf in tmp out || true
+      mkdir -p in tmp out
+
+      echo "Fetching builder artifacts (project=$BUILDER_PROJECT_ID job=$BUILDER_JOB_ID)..."
+      curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+        "$CI_API_V4_URL/projects/$BUILDER_PROJECT_ID/jobs/$BUILDER_JOB_ID/artifacts" \
+        -o tmp/builder.zip
+      unzip -q tmp/builder.zip -d tmp/builder
+      test -f tmp/builder/out/service_meta.json || (echo "Error: builder service_meta.json not found in artifacts" && exit 1)
+      mv tmp/builder/out/* in/
+
+      built_file=$(jq -r .built_file in/service_meta.json)
+      test -n "$built_file" || (echo "Error: built_file missing in builder service_meta.json" && exit 1)
+      test -f "in/$built_file" || (echo "Error: Built file $built_file not found!" && exit 1)
+
+      echo "Executing built artifact: $built_file"
+      set +e
+      bash "in/$built_file" > out/stdout.txt 2> out/stderr.txt
+      exit_code=$?
+      set -e
+
+      jq -n \
+        --argjson exit_code "$exit_code" \
+        '{exit_code: $exit_code}' > out/sandbox.json
+
+      echo "Execution complete. exit_code=$exit_code"
+  artifacts:
+    paths:
+      - out/**
+    when: always
+    expire_in: 1 day
+
+publish_success:
+  stage: publish
+  needs:
+    - job: sandbox
+      artifacts: true
+  when: on_success
+  script:
+    - |
+      echo "Publishing metadata..."
+
+      jq -n \
+        --arg service_name "Sandbox" \
+        --arg repository_url "$CI_PROJECT_URL" \
+        --arg commit_sha "$CI_COMMIT_SHA" \
+        --arg pipeline_url "$CI_PIPELINE_URL" \
+        --arg status "success" \
+        --arg run_id "$RUN_ID" \
+        '{
+          service_name: $service_name,
+          repository_url: $repository_url,
+          commit_sha: $commit_sha,
+          pipeline_url: $pipeline_url,
+          run_id: $run_id,
+          status: $status
+        }' > out/service_meta.json
+
+      echo "Metadata published successfully."
+  artifacts:
+    paths:
+      - out/**
+    when: always
+    expire_in: 1 day
+
+publish_failed:
+  stage: publish
+  needs:
+    - job: sandbox
+      artifacts: true
+      optional: true
+  when: on_failure
+  script:
+    - |
+      mkdir -p out
+
+      echo "Publishing failure metadata..."
+
+      jq -n \
+        --arg service_name "Sandbox" \
+        --arg repository_url "$CI_PROJECT_URL" \
+        --arg commit_sha "$CI_COMMIT_SHA" \
+        --arg pipeline_url "$CI_PIPELINE_URL" \
+        --arg status "failed" \
+        --arg run_id "$RUN_ID" \
+        '{
+          service_name: $service_name,
+          repository_url: $repository_url,
+          commit_sha: $commit_sha,
+          pipeline_url: $pipeline_url,
+          run_id: $run_id,
+          status: $status
+        }' > out/service_meta.json
+
+      echo "Failure metadata published."
+  artifacts:
+    paths:
+      - out/**
+    when: always
+    expire_in: 1 day

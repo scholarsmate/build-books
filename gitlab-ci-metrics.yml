@@ -1,4 +1,20 @@
 # Metrics CI pipeline
+#
+# This service overlay pulls the built binary from the Builder overlay artifacts and computes
+# simple file metrics. Outputs are written to out/* and exported as job artifacts.
+#
+# Required variables:
+# - RUN_ID
+# - BUILDER_PROJECT_ID
+# - BUILDER_JOB_ID
+#
+# Outputs (artifacts):
+# - out/metrics.json
+# - out/service_meta.json
+#
+# Notes:
+# - This pipeline uses the GitLab API (CI_JOB_TOKEN) to fetch Builder artifacts.
+# - Ensure the runner image includes: curl, unzip, jq, file, stat, sha256sum.
 stages:
   - analyze
   - publish
@@ -6,34 +22,58 @@ stages:
 analyze:
   stage: analyze
   script:
-    - mv out in && mkdir -p out
-    - echo "Analyzing artifacts..."
-    - built_file=$(jq -r .built_file in/service_meta.json)
-    - test -f "in/$built_file" || (echo "Error: Built file $built_file not found!" && exit 1)
-    - file_type=$(file -b "in/$built_file")
-    - file_size=$(stat -c%s "in/$built_file")
-    - jq -n \
+    - |
+      set -e
+      test -n "${BUILDER_PROJECT_ID:-}" || (echo "Error: BUILDER_PROJECT_ID is required" && exit 1)
+      test -n "${BUILDER_JOB_ID:-}" || (echo "Error: BUILDER_JOB_ID is required" && exit 1)
+
+      rm -rf in tmp || true
+      mkdir -p in out tmp
+
+      echo "Fetching builder artifacts (project=$BUILDER_PROJECT_ID job=$BUILDER_JOB_ID)..."
+      curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+        "$CI_API_V4_URL/projects/$BUILDER_PROJECT_ID/jobs/$BUILDER_JOB_ID/artifacts" \
+        -o tmp/builder.zip
+      unzip -q tmp/builder.zip -d tmp/builder
+      test -f tmp/builder/out/service_meta.json || (echo "Error: builder service_meta.json not found in artifacts" && exit 1)
+      mv tmp/builder/out/* in/
+
+      echo "Analyzing artifacts..."
+      built_file=$(jq -r .built_file in/service_meta.json)
+      test -f "in/$built_file" || (echo "Error: Built file $built_file not found!" && exit 1)
+
+      file_type=$(file -b "in/$built_file")
+      file_size=$(stat -c%s "in/$built_file")
+      file_sha256=$(sha256sum "in/$built_file" | awk '{print $1}')
+
+      jq -n \
         --arg file_type "$file_type" \
         --arg file_size "$file_size" \
+        --arg file_sha256 "$file_sha256" \
         '{
           file_type: $file_type,
-          file_size: $file_size
+          file_size: $file_size,
+          file_sha256: $file_sha256
         }' > out/metrics.json
-    - echo "Analysis complete. Metrics written to out/metrics.json."
+
+      echo "Analysis complete. Metrics written to out/metrics.json."
   artifacts:
     paths:
       - out/**
     when: always
     expire_in: 1 day
 
-publish:
+publish_success:
   stage: publish
   needs:
     - job: analyze
       artifacts: true
+  when: on_success
   script:
-    - echo "Publishing metadata..."
-    - jq -n \
+    - |
+      echo "Publishing metadata..."
+
+      jq -n \
         --arg service_name "Metrics" \
         --arg repository_url "$CI_PROJECT_URL" \
         --arg commit_sha "$CI_COMMIT_SHA" \
@@ -48,7 +88,44 @@ publish:
           run_id: $run_id,
           status: $status
         }' > out/service_meta.json
-    - echo "Metadata published successfully."
+
+      echo "Metadata published successfully."
+  artifacts:
+    paths:
+      - out/**
+    when: always
+    expire_in: 1 day
+
+publish_failed:
+  stage: publish
+  needs:
+    - job: analyze
+      artifacts: true
+      optional: true
+  when: on_failure
+  script:
+    - |
+      mkdir -p out
+
+      echo "Publishing failure metadata..."
+
+      jq -n \
+        --arg service_name "Metrics" \
+        --arg repository_url "$CI_PROJECT_URL" \
+        --arg commit_sha "$CI_COMMIT_SHA" \
+        --arg pipeline_url "$CI_PIPELINE_URL" \
+        --arg status "failed" \
+        --arg run_id "$RUN_ID" \
+        '{
+          service_name: $service_name,
+          repository_url: $repository_url,
+          commit_sha: $commit_sha,
+          pipeline_url: $pipeline_url,
+          run_id: $run_id,
+          status: $status
+        }' > out/service_meta.json
+
+      echo "Failure metadata published."
   artifacts:
     paths:
       - out/**

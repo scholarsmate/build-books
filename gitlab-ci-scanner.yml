@@ -1,0 +1,154 @@
+# Scanner CI pipeline (VirusTotal)
+#
+# This service overlay pulls the built binary from the Builder overlay artifacts and submits it
+# to VirusTotal for scanning. Outputs are written to out/* and exported as job artifacts.
+#
+# Required variables:
+# - RUN_ID
+# - BUILDER_PROJECT_ID
+# - BUILDER_JOB_ID
+# - VT_API_KEY (VirusTotal API key)
+#
+# Optional variables:
+# - VT_TIMEOUT_SECONDS (default: 300) total time to wait for analysis completion
+# - VT_POLL_INTERVAL_SECONDS (default: 10) seconds between status polls
+#
+# Notes:
+# - This pipeline uses the GitLab API (CI_JOB_TOKEN) to fetch Builder artifacts.
+# - The upload will transmit the binary to VirusTotal; ensure this is acceptable for your org.
+
+stages:
+  - scan
+  - publish
+
+scan:
+  stage: scan
+  script:
+    - |
+      set -e
+      test -n "${RUN_ID:-}" || (echo "Error: RUN_ID is required" && exit 1)
+      test -n "${BUILDER_PROJECT_ID:-}" || (echo "Error: BUILDER_PROJECT_ID is required" && exit 1)
+      test -n "${BUILDER_JOB_ID:-}" || (echo "Error: BUILDER_JOB_ID is required" && exit 1)
+      test -n "${VT_API_KEY:-}" || (echo "Error: VT_API_KEY is required" && exit 1)
+
+      VT_TIMEOUT_SECONDS=${VT_TIMEOUT_SECONDS:-300}
+      VT_POLL_INTERVAL_SECONDS=${VT_POLL_INTERVAL_SECONDS:-10}
+      echo "VirusTotal timeout=${VT_TIMEOUT_SECONDS}s poll_interval=${VT_POLL_INTERVAL_SECONDS}s"
+
+      rm -rf in tmp out || true
+      mkdir -p in tmp out
+
+      echo "Fetching builder artifacts (project=$BUILDER_PROJECT_ID job=$BUILDER_JOB_ID)..."
+      curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+        "$CI_API_V4_URL/projects/$BUILDER_PROJECT_ID/jobs/$BUILDER_JOB_ID/artifacts" \
+        -o tmp/builder.zip
+      unzip -q tmp/builder.zip -d tmp/builder
+      test -f tmp/builder/out/service_meta.json || (echo "Error: builder service_meta.json not found in artifacts" && exit 1)
+      mv tmp/builder/out/* in/
+
+      built_file=$(jq -r .built_file in/service_meta.json)
+      test -f "in/$built_file" || (echo "Error: Built file $built_file not found!" && exit 1)
+
+      echo "Submitting $built_file to VirusTotal..."
+      upload_resp=$(curl --fail --silent \
+        --request POST \
+        --header "x-apikey: $VT_API_KEY" \
+        --form "file=@in/$built_file" \
+        "https://www.virustotal.com/api/v3/files")
+      echo "$upload_resp" > out/virustotal_upload.json
+      analysis_id=$(echo "$upload_resp" | jq -r '.data.id')
+      test -n "$analysis_id" || (echo "Error: VirusTotal upload did not return analysis id" && exit 1)
+      echo "$analysis_id" > out/virustotal_analysis_id.txt
+
+      echo "Polling VirusTotal analysis ($analysis_id)..."
+      deadline=$(( $(date +%s) + VT_TIMEOUT_SECONDS ))
+      status=""
+      while [ "$(date +%s)" -lt "$deadline" ]; do
+        resp=$(curl --fail --silent \
+          --header "x-apikey: $VT_API_KEY" \
+          "https://www.virustotal.com/api/v3/analyses/$analysis_id")
+        status=$(echo "$resp" | jq -r '.data.attributes.status')
+        echo "$resp" > out/virustotal_analysis.json
+        if [ "$status" = "completed" ]; then
+          echo "Analysis completed."
+          break
+        fi
+        sleep "$VT_POLL_INTERVAL_SECONDS"
+      done
+      test "$status" = "completed" || (echo "Error: VirusTotal analysis did not complete in time" && exit 1)
+
+      echo "Scan complete."
+  artifacts:
+    paths:
+      - out/**
+    when: always
+    expire_in: 1 day
+
+publish_success:
+  stage: publish
+  needs:
+    - job: scan
+      artifacts: true
+  when: on_success
+  script:
+    - |
+      echo "Publishing metadata..."
+
+      jq -n \
+        --arg service_name "Scanner" \
+        --arg repository_url "$CI_PROJECT_URL" \
+        --arg commit_sha "$CI_COMMIT_SHA" \
+        --arg pipeline_url "$CI_PIPELINE_URL" \
+        --arg run_id "$RUN_ID" \
+        --arg status "success" \
+        '{
+          service_name: $service_name,
+          repository_url: $repository_url,
+          commit_sha: $commit_sha,
+          pipeline_url: $pipeline_url,
+          run_id: $run_id,
+          status: $status
+        }' > out/service_meta.json
+
+      echo "Metadata published successfully."
+  artifacts:
+    paths:
+      - out/**
+    when: always
+    expire_in: 1 day
+
+publish_failed:
+  stage: publish
+  needs:
+    - job: scan
+      artifacts: true
+      optional: true
+  when: on_failure
+  script:
+    - |
+      mkdir -p out
+
+      echo "Publishing failure metadata..."
+
+      jq -n \
+        --arg service_name "Scanner" \
+        --arg repository_url "$CI_PROJECT_URL" \
+        --arg commit_sha "$CI_COMMIT_SHA" \
+        --arg pipeline_url "$CI_PIPELINE_URL" \
+        --arg run_id "$RUN_ID" \
+        --arg status "failed" \
+        '{
+          service_name: $service_name,
+          repository_url: $repository_url,
+          commit_sha: $commit_sha,
+          pipeline_url: $pipeline_url,
+          run_id: $run_id,
+          status: $status
+        }' > out/service_meta.json
+
+      echo "Failure metadata published."
+  artifacts:
+    paths:
+      - out/**
+    when: always
+    expire_in: 1 day
