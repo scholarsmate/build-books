@@ -1471,13 +1471,13 @@ Everything that matters is made explicit, versioned, and auditable through artif
 ### 9.1 The `out/` Artifact Contract
 
 ```text
-       ┌──────────────────────────────┐
-       │        Orchestrator          │
-       │      (control plane)         │
-       └─────────────┬────────────────┘
-               │
-               │ needs: artifacts:true
-               │
+                   ┌────────────────────────────┐
+                   │        Orchestrator        │
+                   │      (control plane)       │
+                   └─────────────┬──────────────┘
+                                 │
+                                 │ needs: artifacts:true
+                                 │
   ┌──────────────────────────────▼──────────────────────────────┐
   │                        Service Overlay                      │
   │                                                             │
@@ -1491,10 +1491,10 @@ Everything that matters is made explicit, versioned, and auditable through artif
   │       <service outputs>                                     │
   │                                                             │
   └──────────────────────────────┬──────────────────────────────┘
-               │
-               │ artifacts materialized
-               │ (opaque payload)
-               │
+                                 │
+                                 │ artifacts materialized
+                                 │ (opaque payload)
+                                 │
   ┌──────────────────────────────▼──────────────────────────────┐
   │                         Gatherer Job                        │
   │                      (orchestrator-owned)                   │
