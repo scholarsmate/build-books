@@ -89,7 +89,7 @@ publish_success:
           run_id: $run_id,
           built_file: $built_file,
           status: $status
-        }' > out/service_meta.json
+        }' | tee out/service_meta.json
 
       echo "Metadata published successfully."
   artifacts:
@@ -130,7 +130,7 @@ publish_failed:
           run_id: $run_id,
           built_file: $built_file,
           status: $status
-        }' > out/service_meta.json
+        }' | tee out/service_meta.json
 
       echo "Failure metadata published."
   artifacts:
