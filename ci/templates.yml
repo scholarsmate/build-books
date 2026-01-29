@@ -61,9 +61,9 @@
 
     pkg="${OWO_BUS_PACKAGE}${BUS_SUFFIX}"
 
-    test -n "${OWO_BUS_PROJECT_ID:-}" || (echo "OWO_BUS_PROJECT_ID is required" >&2; exit 1)
-    test -n "${OWO_BUS_PACKAGE:-}"    || (echo "OWO_BUS_PACKAGE is required" >&2; exit 1)
-    test -n "${RUN_ID:-}"             || (echo "RUN_ID is required" >&2; exit 1)
+    test -n "${OWO_BUS_PROJECT_ID:-}" || die "OWO_BUS_PROJECT_ID is required"
+    test -n "${OWO_BUS_PACKAGE:-}"    || die "OWO_BUS_PACKAGE is required"
+    test -n "${RUN_ID:-}"             || die "RUN_ID is required"
 
     echo "Publishing to bus: project=$OWO_BUS_PROJECT_ID package=$pkg version=$RUN_ID"
 
