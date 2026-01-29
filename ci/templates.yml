@@ -11,7 +11,6 @@
   script: |-
     set -euo pipefail
     source ci/lib.sh
-    require_bin jq
 
     read -r DS_PROJECT_ID DS_PIPELINE_ID < <(get_bridge_downstream "$TRIGGER_JOB_NAME")
     DS_JOB_ID="$(find_artifacts_job_id "$DS_PROJECT_ID" "$DS_PIPELINE_ID" "$OWO_ARTIFACT_JOB_NAME")"
@@ -20,7 +19,7 @@
       echo "${PREFIX}_PROJECT_ID=$DS_PROJECT_ID";
       echo "${PREFIX}_PIPELINE_ID=$DS_PIPELINE_ID";
       echo "${PREFIX}_JOB_ID=$DS_JOB_ID";
-    } > "${PREFIX,,}.env"
+    } | tee "${PREFIX,,}.env"
   artifacts:
     reports:
       dotenv: "${PREFIX,,}.env"
@@ -34,7 +33,7 @@
   script: |-
     set -euo pipefail
     source ci/lib.sh
-    require_bin jq
+    require_bin unzip
 
     mkdir -p "tmp/$SERVICE" "out/$SERVICE"
 
@@ -64,7 +63,7 @@
 
     test -n "${OWO_BUS_PROJECT_ID:-}" || (echo "OWO_BUS_PROJECT_ID is required" >&2; exit 1)
     test -n "${OWO_BUS_PACKAGE:-}"    || (echo "OWO_BUS_PACKAGE is required" >&2; exit 1)
-    test -n "${RUN_ID:-}"            || (echo "RUN_ID is required" >&2; exit 1)
+    test -n "${RUN_ID:-}"             || (echo "RUN_ID is required" >&2; exit 1)
 
     echo "Publishing to bus: project=$OWO_BUS_PROJECT_ID package=$pkg version=$RUN_ID"
 
