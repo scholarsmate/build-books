@@ -28,10 +28,13 @@ build:
       mkdir -p out
 
       echo "Building executable..."
+      
       cat > out/exe.bin <<'EOF'
+      #!/usr/bin/env bash
       set -e
       echo "Hello, world!"
       EOF
+      
       chmod +x out/exe.bin
       sha256sum out/exe.bin | awk '{print $1}' > out/exe.sha256
       echo "Executable built successfully."
