@@ -70,7 +70,7 @@ api_get() {
         fi
 
         attempt=$(( attempt + 1 ))
-        echo "WARNING: Failed to fetch URL: $url (attempt $attempt/$MAX_RETRIES)" >&2
+        warn "Failed to fetch URL: $url (attempt $attempt/$MAX_RETRIES)"
 
         if (( attempt < MAX_RETRIES )); then
             echo "Retrying in $RETRY_DELAY seconds..." >&2
@@ -180,7 +180,7 @@ download_job_artifacts_zip() {
         fi
 
         attempt=$(( attempt + 1 ))
-        echo "WARNING: Failed to download artifacts for project_id=$project_id, job_id=$job_id (attempt $attempt/$MAX_RETRIES)" >&2
+        warn "Failed to download artifacts for project_id=$project_id, job_id=$job_id (attempt $attempt/$MAX_RETRIES)"
 
         if (( attempt < MAX_RETRIES )); then
             echo "Retrying in $RETRY_DELAY seconds..." >&2
@@ -224,7 +224,7 @@ upload_generic_package_file() {
         fi
 
         attempt=$(( attempt + 1 ))
-        echo "WARNING: Failed to upload file=$file_path to project_id=$project_id, package=$package_name, version=$version (attempt $attempt/$MAX_RETRIES)" >&2
+        warn "Failed to upload file=$file_path to project_id=$project_id, package=$package_name, version=$version (attempt $attempt/$MAX_RETRIES)"
 
         if (( attempt < MAX_RETRIES )); then
             echo "Retrying in $RETRY_DELAY seconds..." >&2
