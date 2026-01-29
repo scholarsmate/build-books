@@ -55,7 +55,7 @@ analyze:
           file_type: $file_type,
           file_size: $file_size,
           file_sha256: $file_sha256
-        }' > out/metrics.json
+        }' | tee out/metrics.json
 
       echo "Analysis complete. Metrics written to out/metrics.json."
   artifacts:
@@ -88,7 +88,7 @@ publish_success:
           pipeline_url: $pipeline_url,
           run_id: $run_id,
           status: $status
-        }' > out/service_meta.json
+        }' | tee out/service_meta.json
 
       echo "Metadata published successfully."
   artifacts:
@@ -124,7 +124,7 @@ publish_failed:
           pipeline_url: $pipeline_url,
           run_id: $run_id,
           status: $status
-        }' > out/service_meta.json
+        }' | tee out/service_meta.json
 
       echo "Failure metadata published."
   artifacts:
