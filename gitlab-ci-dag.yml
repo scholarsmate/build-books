@@ -91,7 +91,7 @@ kickoff:
       echo "OWO_METRICS_REF=$OWO_METRICS_REF";
       echo "OWO_SANDBOX_REF=$OWO_SANDBOX_REF";
       echo "OWO_SCANNER_REF=$OWO_SCANNER_REF";
-    } > run.env
+    } | tee run.env
   artifacts:
     reports:
       dotenv: run.env
@@ -331,7 +331,7 @@ bundle:
 
     mkdir -p final
 
-    jq -n --arg run_id "$RUN_ID" '{run_id:$run_id}' > manifest.json
+    jq -n --arg run_id "$RUN_ID" '{run_id:$run_id}' | tee manifest.json
 
     7z a -t7z -p"$RUN_ID" -mhe=on "final/run-${RUN_ID}.7z" out/ manifest.json
   artifacts:
@@ -355,6 +355,12 @@ gate:
     test -f out/builder/service_meta.json
 
     # Optional gate behavior: if sandbox ran, require sandbox metadata.
+    if [ -n "${OWO_METRICS_REF:-}" ]; then
+      test -f out/metrics/service_meta.json
+    fi
+    if [ -n "${OWO_SCANNER_REF:-}" ]; then
+      test -f out/scanner/service_meta.json
+    fi
     if [ -n "${OWO_SANDBOX_REF:-}" ]; then
       test -f out/sandbox/service_meta.json
     fi
