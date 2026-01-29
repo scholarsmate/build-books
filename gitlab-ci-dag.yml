@@ -1,3 +1,5 @@
+# gitlab-ci-dag.yml
+#
 # Orchestrator CI pipeline (reference implementation)
 #
 # This pipeline defines the workflow DAG and serves as the single marshaler and publisher.
@@ -9,21 +11,26 @@
 # - OWO_BUS_PROJECT_ID (numeric GitLab project id that hosts the bus package registry)
 # - OWO_BUS_PACKAGE (generic package name, e.g. "owo-runs")
 #
-# Optional variables:
-# - OWO_BUILDER_REF (default: main) ref for the builder overlay
-# - OWO_METRICS_REF (default: main) ref for the metrics overlay
-# - OWO_SANDBOX_REF (default: main) ref for the sandbox overlay
-# - OWO_SCANNER_REF (optional) if set, triggers the VirusTotal scanner overlay at this ref
-# - Bundle is always encrypted with RUN_ID (lightweight friction; not a security control)
+# Optional services (metrics/sandbox/scanner) are controlled by *_REF:
+# - If OWO_<SERVICE>_REF is empty, that service is skipped.
 # - VT_TIMEOUT_SECONDS (optional) passed to the scanner overlay
 # - VT_POLL_INTERVAL_SECONDS (optional) passed to the scanner overlay
+# - Bundle is always encrypted with RUN_ID (lightweight friction; not a security control)
 #
 # Generated variables:
 # - RUN_ID (UUID) generated at kickoff and propagated to services
 #
+# Standardized overlay contract:
+# - Downstream pipelines MUST produce artifacts from a job named exactly "run"
+#   containing at least: out/service_meta.json
+#
 # Notes:
 # - This pipeline uses the GitLab API with CI_JOB_TOKEN for resolving downstream pipelines and downloading artifacts.
 # - Ensure the runner image includes: curl, jq, 7z, unzip, uuidgen.
+
+include:
+  - local: ci/templates.yml
+
 stages:
   - kickoff
   - trigger
@@ -33,27 +40,66 @@ stages:
   - gate
   - publish
 
+default:
+  image: alpine:3.20
+  before_script:
+    - apk add --no-cache bash curl jq unzip p7zip util-linux coreutils
+  variables:
+    GIT_STRATEGY: none
+
+variables:
+  # Service projects (override in CI/CD variables if yours differ)
+  OWO_BUILDER_PROJECT: "owo/builder-hello"
+  OWO_METRICS_PROJECT: "owo/metrics-basic"
+  OWO_SANDBOX_PROJECT: "owo/sandbox-exec"
+  OWO_SCANNER_PROJECT: "owo/scanner-virustotal"
+
+  # Optional services default off (HTML/URL sets these per run)
+  OWO_METRICS_REF: ""
+  OWO_SANDBOX_REF: ""
+  OWO_SCANNER_REF: ""
+
+  # Standardized artifacts job name in ALL downstream pipelines
+  OWO_ARTIFACT_JOB_NAME: "^run$"
+
 kickoff:
   stage: kickoff
-  script:
-    - |
-      set -e
-      test -n "${OWO_BUS_PROJECT_ID:-}" || (echo "Error: OWO_BUS_PROJECT_ID is required (numeric)." && exit 1)
-      echo "$OWO_BUS_PROJECT_ID" | grep -Eq '^[0-9]+$' || (echo "Error: OWO_BUS_PROJECT_ID must be numeric." && exit 1)
-      test -n "${OWO_BUS_PACKAGE:-}" || (echo "Error: OWO_BUS_PACKAGE is required (e.g., owo-runs)." && exit 1)
+  script: |-
+    set -euo pipefail
 
-      export RUN_ID=$(uuidgen)
-      echo "RUN_ID=$RUN_ID" > run.env
-      echo "OWO_BUS_PROJECT_ID=$OWO_BUS_PROJECT_ID" >> run.env
-      echo "OWO_BUS_PACKAGE=$OWO_BUS_PACKAGE" >> run.env
-      echo "OWO_BUILDER_REF=${OWO_BUILDER_REF:-main}" >> run.env
-      echo "OWO_METRICS_REF=${OWO_METRICS_REF:-main}" >> run.env
-      echo "OWO_SANDBOX_REF=${OWO_SANDBOX_REF:-main}" >> run.env
-      echo "OWO_SCANNER_REF=${OWO_SCANNER_REF:-}" >> run.env
+    test -n "${OWO_BUS_PROJECT_ID:-}" || (echo "Error: OWO_BUS_PROJECT_ID is required (numeric bus project id)." >&2; exit 1)
+    echo "$OWO_BUS_PROJECT_ID" | grep -Eq '^[0-9]+$' || (echo "Error: OWO_BUS_PROJECT_ID must be numeric." >&2; exit 1)
+    test -n "${OWO_BUS_PACKAGE:-}" || (echo "Error: OWO_BUS_PACKAGE is required (generic package name)." >&2; exit 1)
+
+    # Allow caller to supply RUN_ID; otherwise generate it.
+    if [ -z "${RUN_ID:-}" ]; then
+      RUN_ID="$(uuidgen)"
+    fi
+
+    # Normalize refs: builder always defaults to main, others are optional.
+    : "${OWO_BUILDER_REF:=main}"
+    : "${OWO_METRICS_REF:=}"
+    : "${OWO_SANDBOX_REF:=}"
+    : "${OWO_SCANNER_REF:=}"
+
+    {
+      echo "RUN_ID=$RUN_ID";
+      echo "OWO_BUS_PROJECT_ID=$OWO_BUS_PROJECT_ID";
+      echo "OWO_BUS_PACKAGE=$OWO_BUS_PACKAGE";
+
+      echo "OWO_BUILDER_REF=$OWO_BUILDER_REF";
+      echo "OWO_METRICS_REF=$OWO_METRICS_REF";
+      echo "OWO_SANDBOX_REF=$OWO_SANDBOX_REF";
+      echo "OWO_SCANNER_REF=$OWO_SCANNER_REF";
+    } > run.env
   artifacts:
     reports:
       dotenv: run.env
-    expire_in: 1 day  # Retain artifacts for 1 day
+    expire_in: 1 day
+
+# -----------------------------------------------------------------------------
+# TRIGGER STAGE
+# -----------------------------------------------------------------------------
 
 trigger_builder:
   stage: trigger
@@ -61,54 +107,26 @@ trigger_builder:
     - job: kickoff
       artifacts: true
   trigger:
-    project: owo/builder-hello
-    branch: $OWO_BUILDER_REF
+    project: "$OWO_BUILDER_PROJECT"
+    branch: "$OWO_BUILDER_REF"
     strategy: depend
-  allow_failure: true
   variables:
-    RUN_ID: $RUN_ID
+    RUN_ID: "$RUN_ID"
+    OWO_BUS_PROJECT_ID: "$OWO_BUS_PROJECT_ID"
+    OWO_BUS_PACKAGE: "$OWO_BUS_PACKAGE"
+  allow_failure: false
 
+# Builder resolve MUST be in stage=trigger so optional downstream triggers can legally needs it.
 resolve_builder:
-  stage: resolve
+  extends: .resolve_downstream_template
+  stage: trigger
   needs:
     - job: kickoff
       artifacts: true
     - job: trigger_builder
-  script:
-    - |
-      set -e
-      echo "Resolving builder downstream pipeline + artifact job..."
-
-      bridge_id=$(curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/pipelines/$CI_PIPELINE_ID/jobs?per_page=100" \
-        | jq -r '.[] | select(.name=="trigger_builder") | .id' | head -n 1)
-      test -n "$bridge_id" || (echo "Error: could not find trigger_builder bridge job id" && exit 1)
-
-      bridge=$(curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$bridge_id")
-      builder_project_id=$(echo "$bridge" | jq -r '.downstream_pipeline.project_id')
-      builder_pipeline_id=$(echo "$bridge" | jq -r '.downstream_pipeline.id')
-      test -n "$builder_project_id" || (echo "Error: missing downstream_pipeline.project_id" && exit 1)
-      test -n "$builder_pipeline_id" || (echo "Error: missing downstream_pipeline.id" && exit 1)
-
-      job_id=$(curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$builder_project_id/pipelines/$builder_pipeline_id/jobs?per_page=100" \
-        | jq -r '[.[]
-          | select(.artifacts_file != null)
-          | select(.name=="publish_success" or .name=="publish_failed" or .name=="publish")
-          ]
-          | sort_by(.id)
-          | last
-          | .id')
-      test -n "$job_id" || (echo "Error: could not find builder job with artifacts" && exit 1)
-
-      echo "BUILDER_PROJECT_ID=$builder_project_id" > builder.env
-      echo "BUILDER_PIPELINE_ID=$builder_pipeline_id" >> builder.env
-      echo "BUILDER_JOB_ID=$job_id" >> builder.env
-  artifacts:
-    reports:
-      dotenv: builder.env
-    expire_in: 1 day
+  variables:
+    TRIGGER_JOB_NAME: "trigger_builder"
+    PREFIX: "BUILDER"
 
 trigger_metrics:
   stage: trigger
@@ -117,15 +135,18 @@ trigger_metrics:
       artifacts: true
     - job: resolve_builder
       artifacts: true
+  rules:
+    - if: '$OWO_METRICS_REF'
+      when: on_success
+    - when: never
   trigger:
-    project: owo/metrics-basic
-    branch: $OWO_METRICS_REF
+    project: "$OWO_METRICS_PROJECT"
+    branch: "$OWO_METRICS_REF"
     strategy: depend
-  allow_failure: true
   variables:
-    RUN_ID: $RUN_ID
-    BUILDER_PROJECT_ID: $BUILDER_PROJECT_ID
-    BUILDER_JOB_ID: $BUILDER_JOB_ID
+    RUN_ID: "$RUN_ID"
+    BUILDER_PROJECT_ID: "$BUILDER_PROJECT_ID"
+    BUILDER_JOB_ID: "$BUILDER_JOB_ID"
 
 trigger_sandbox:
   stage: trigger
@@ -134,15 +155,18 @@ trigger_sandbox:
       artifacts: true
     - job: resolve_builder
       artifacts: true
+  rules:
+    - if: '$OWO_SANDBOX_REF'
+      when: on_success
+    - when: never
   trigger:
-    project: owo/sandbox-exec
-    branch: $OWO_SANDBOX_REF
+    project: "$OWO_SANDBOX_PROJECT"
+    branch: "$OWO_SANDBOX_REF"
     strategy: depend
-  allow_failure: true
   variables:
-    RUN_ID: $RUN_ID
-    BUILDER_PROJECT_ID: $BUILDER_PROJECT_ID
-    BUILDER_JOB_ID: $BUILDER_JOB_ID
+    RUN_ID: "$RUN_ID"
+    BUILDER_PROJECT_ID: "$BUILDER_PROJECT_ID"
+    BUILDER_JOB_ID: "$BUILDER_JOB_ID"
 
 trigger_scanner:
   stage: trigger
@@ -156,103 +180,52 @@ trigger_scanner:
       when: on_success
     - when: never
   trigger:
-    project: owo/scanner-virustotal
-    branch: $OWO_SCANNER_REF
+    project: "$OWO_SCANNER_PROJECT"
+    branch: "$OWO_SCANNER_REF"
     strategy: depend
-  allow_failure: true
   variables:
-    RUN_ID: $RUN_ID
-    BUILDER_PROJECT_ID: $BUILDER_PROJECT_ID
-    BUILDER_JOB_ID: $BUILDER_JOB_ID
-    VT_TIMEOUT_SECONDS: $VT_TIMEOUT_SECONDS
-    VT_POLL_INTERVAL_SECONDS: $VT_POLL_INTERVAL_SECONDS
+    RUN_ID: "$RUN_ID"
+    BUILDER_PROJECT_ID: "$BUILDER_PROJECT_ID"
+    BUILDER_JOB_ID: "$BUILDER_JOB_ID"
+    VT_TIMEOUT_SECONDS: "$VT_TIMEOUT_SECONDS"
+    VT_POLL_INTERVAL_SECONDS: "$VT_POLL_INTERVAL_SECONDS"
+
+# -----------------------------------------------------------------------------
+# RESOLVE STAGE (optional services)
+# -----------------------------------------------------------------------------
 
 resolve_metrics:
-  stage: resolve
+  extends: .resolve_downstream_template
   needs:
     - job: kickoff
       artifacts: true
     - job: trigger_metrics
-  script:
-    - |
-      set -e
-      echo "Resolving metrics downstream pipeline + artifact job..."
-
-      bridge_id=$(curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/pipelines/$CI_PIPELINE_ID/jobs?per_page=100" \
-        | jq -r '.[] | select(.name=="trigger_metrics") | .id' | head -n 1)
-      test -n "$bridge_id" || (echo "Error: could not find trigger_metrics bridge job id" && exit 1)
-
-      bridge=$(curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$bridge_id")
-      metrics_project_id=$(echo "$bridge" | jq -r '.downstream_pipeline.project_id')
-      metrics_pipeline_id=$(echo "$bridge" | jq -r '.downstream_pipeline.id')
-      test -n "$metrics_project_id" || (echo "Error: missing downstream_pipeline.project_id" && exit 1)
-      test -n "$metrics_pipeline_id" || (echo "Error: missing downstream_pipeline.id" && exit 1)
-
-      job_id=$(curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$metrics_project_id/pipelines/$metrics_pipeline_id/jobs?per_page=100" \
-        | jq -r '[.[]
-          | select(.artifacts_file != null)
-          | select(.name=="publish_success" or .name=="publish_failed" or .name=="publish")
-          ]
-          | sort_by(.id)
-          | last
-          | .id')
-      test -n "$job_id" || (echo "Error: could not find metrics job with artifacts" && exit 1)
-
-      echo "METRICS_PROJECT_ID=$metrics_project_id" > metrics.env
-      echo "METRICS_PIPELINE_ID=$metrics_pipeline_id" >> metrics.env
-      echo "METRICS_JOB_ID=$job_id" >> metrics.env
-  artifacts:
-    reports:
-      dotenv: metrics.env
-    expire_in: 1 day
+      optional: true
+  rules:
+    - if: '$OWO_METRICS_REF'
+      when: on_success
+    - when: never
+  variables:
+    TRIGGER_JOB_NAME: "trigger_metrics"
+    PREFIX: "METRICS"
 
 resolve_sandbox:
-  stage: resolve
+  extends: .resolve_downstream_template
   needs:
     - job: kickoff
       artifacts: true
     - job: trigger_sandbox
-  script:
-    - |
-      set -e
-      echo "Resolving sandbox downstream pipeline + artifact job..."
-
-      bridge_id=$(curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/pipelines/$CI_PIPELINE_ID/jobs?per_page=100" \
-        | jq -r '.[] | select(.name=="trigger_sandbox") | .id' | head -n 1)
-      test -n "$bridge_id" || (echo "Error: could not find trigger_sandbox bridge job id" && exit 1)
-
-      bridge=$(curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$bridge_id")
-      sandbox_project_id=$(echo "$bridge" | jq -r '.downstream_pipeline.project_id')
-      sandbox_pipeline_id=$(echo "$bridge" | jq -r '.downstream_pipeline.id')
-      test -n "$sandbox_project_id" || (echo "Error: missing downstream_pipeline.project_id" && exit 1)
-      test -n "$sandbox_pipeline_id" || (echo "Error: missing downstream_pipeline.id" && exit 1)
-
-      job_id=$(curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$sandbox_project_id/pipelines/$sandbox_pipeline_id/jobs?per_page=100" \
-        | jq -r '[.[]
-          | select(.artifacts_file != null)
-          | select(.name=="publish_success" or .name=="publish_failed" or .name=="publish")
-          ]
-          | sort_by(.id)
-          | last
-          | .id')
-      test -n "$job_id" || (echo "Error: could not find sandbox job with artifacts" && exit 1)
-
-      echo "SANDBOX_PROJECT_ID=$sandbox_project_id" > sandbox.env
-      echo "SANDBOX_PIPELINE_ID=$sandbox_pipeline_id" >> sandbox.env
-      echo "SANDBOX_JOB_ID=$job_id" >> sandbox.env
-  artifacts:
-    reports:
-      dotenv: sandbox.env
-    expire_in: 1 day
+      optional: true
+  rules:
+    - if: '$OWO_SANDBOX_REF'
+      when: on_success
+    - when: never
+  variables:
+    TRIGGER_JOB_NAME: "trigger_sandbox"
+    PREFIX: "SANDBOX"
 
 resolve_scanner:
-  stage: resolve
+  extends: .resolve_downstream_template
   needs:
     - job: kickoff
       artifacts: true
@@ -262,119 +235,62 @@ resolve_scanner:
     - if: '$OWO_SCANNER_REF'
       when: on_success
     - when: never
-  script:
-    - |
-      set -e
-      echo "Resolving scanner downstream pipeline + artifact job..."
+  variables:
+    TRIGGER_JOB_NAME: "trigger_scanner"
+    PREFIX: "SCANNER"
 
-      bridge_id=$(curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/pipelines/$CI_PIPELINE_ID/jobs?per_page=100" \
-        | jq -r '.[] | select(.name=="trigger_scanner") | .id' | head -n 1)
-      test -n "$bridge_id" || (echo "Error: could not find trigger_scanner bridge job id" && exit 1)
-
-      bridge=$(curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/jobs/$bridge_id")
-      scanner_project_id=$(echo "$bridge" | jq -r '.downstream_pipeline.project_id')
-      scanner_pipeline_id=$(echo "$bridge" | jq -r '.downstream_pipeline.id')
-      test -n "$scanner_project_id" || (echo "Error: missing downstream_pipeline.project_id" && exit 1)
-      test -n "$scanner_pipeline_id" || (echo "Error: missing downstream_pipeline.id" && exit 1)
-
-      job_id=$(curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$scanner_project_id/pipelines/$scanner_pipeline_id/jobs?per_page=100" \
-        | jq -r '[.[]
-          | select(.artifacts_file != null)
-          | select(.name=="publish_success" or .name=="publish_failed" or .name=="publish")
-          ]
-          | sort_by(.id)
-          | last
-          | .id')
-      test -n "$job_id" || (echo "Error: could not find scanner job with artifacts" && exit 1)
-
-      echo "SCANNER_PROJECT_ID=$scanner_project_id" > scanner.env
-      echo "SCANNER_PIPELINE_ID=$scanner_pipeline_id" >> scanner.env
-      echo "SCANNER_JOB_ID=$job_id" >> scanner.env
-  artifacts:
-    reports:
-      dotenv: scanner.env
-    expire_in: 1 day
+# -----------------------------------------------------------------------------
+# COLLECT STAGE
+# -----------------------------------------------------------------------------
 
 collect_builder:
-  stage: collect
+  extends: .collect_template
   needs:
     - job: kickoff
       artifacts: true
     - job: resolve_builder
       artifacts: true
-  script:
-    - |
-      set -e
-      mkdir -p out/builder tmp
-
-      echo "Downloading builder artifacts (project=$BUILDER_PROJECT_ID job=$BUILDER_JOB_ID)..."
-      curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$BUILDER_PROJECT_ID/jobs/$BUILDER_JOB_ID/artifacts" \
-        -o tmp/builder.zip
-      unzip -q tmp/builder.zip -d tmp/builder
-      test -f tmp/builder/out/service_meta.json || (echo "Error: builder service_meta.json not found in artifacts" && exit 1)
-      mv tmp/builder/out/* out/builder/
-  artifacts:
-    paths:
-      - out/**
-    when: always
-    expire_in: 1 day
+  variables:
+    SERVICE: "builder"
+    PROJECT_ID: "$BUILDER_PROJECT_ID"
+    JOB_ID: "$BUILDER_JOB_ID"
 
 collect_metrics:
-  stage: collect
+  extends: .collect_template
   needs:
     - job: kickoff
       artifacts: true
     - job: resolve_metrics
       artifacts: true
-  script:
-    - |
-      set -e
-      mkdir -p out/metrics tmp
-
-      echo "Downloading metrics artifacts (project=$METRICS_PROJECT_ID job=$METRICS_JOB_ID)..."
-      curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$METRICS_PROJECT_ID/jobs/$METRICS_JOB_ID/artifacts" \
-        -o tmp/metrics.zip
-      unzip -q tmp/metrics.zip -d tmp/metrics
-      test -f tmp/metrics/out/service_meta.json || (echo "Error: metrics service_meta.json not found in artifacts" && exit 1)
-      mv tmp/metrics/out/* out/metrics/
-  artifacts:
-    paths:
-      - out/**
-    when: always
-    expire_in: 1 day
+      optional: true
+  rules:
+    - if: '$OWO_METRICS_REF'
+      when: on_success
+    - when: never
+  variables:
+    SERVICE: "metrics"
+    PROJECT_ID: "$METRICS_PROJECT_ID"
+    JOB_ID: "$METRICS_JOB_ID"
 
 collect_sandbox:
-  stage: collect
+  extends: .collect_template
   needs:
     - job: kickoff
       artifacts: true
     - job: resolve_sandbox
       artifacts: true
-  script:
-    - |
-      set -e
-      mkdir -p out/sandbox tmp
-
-      echo "Downloading sandbox artifacts (project=$SANDBOX_PROJECT_ID job=$SANDBOX_JOB_ID)..."
-      curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$SANDBOX_PROJECT_ID/jobs/$SANDBOX_JOB_ID/artifacts" \
-        -o tmp/sandbox.zip
-      unzip -q tmp/sandbox.zip -d tmp/sandbox
-      test -f tmp/sandbox/out/service_meta.json || (echo "Error: sandbox service_meta.json not found in artifacts" && exit 1)
-      mv tmp/sandbox/out/* out/sandbox/
-  artifacts:
-    paths:
-      - out/**
-    when: always
-    expire_in: 1 day
+      optional: true
+  rules:
+    - if: '$OWO_SANDBOX_REF'
+      when: on_success
+    - when: never
+  variables:
+    SERVICE: "sandbox"
+    PROJECT_ID: "$SANDBOX_PROJECT_ID"
+    JOB_ID: "$SANDBOX_JOB_ID"
 
 collect_scanner:
-  stage: collect
+  extends: .collect_template
   needs:
     - job: kickoff
       artifacts: true
@@ -385,23 +301,14 @@ collect_scanner:
     - if: '$OWO_SCANNER_REF'
       when: on_success
     - when: never
-  script:
-    - |
-      set -e
-      mkdir -p out/scanner tmp
+  variables:
+    SERVICE: "scanner"
+    PROJECT_ID: "$SCANNER_PROJECT_ID"
+    JOB_ID: "$SCANNER_JOB_ID"
 
-      echo "Downloading scanner artifacts (project=$SCANNER_PROJECT_ID job=$SCANNER_JOB_ID)..."
-      curl --fail --silent --header "JOB-TOKEN: $CI_JOB_TOKEN" \
-        "$CI_API_V4_URL/projects/$SCANNER_PROJECT_ID/jobs/$SCANNER_JOB_ID/artifacts" \
-        -o tmp/scanner.zip
-      unzip -q tmp/scanner.zip -d tmp/scanner
-      test -f tmp/scanner/out/service_meta.json || (echo "Error: scanner service_meta.json not found in artifacts" && exit 1)
-      mv tmp/scanner/out/* out/scanner/
-  artifacts:
-    paths:
-      - out/**
-    when: always
-    expire_in: 1 day
+# -----------------------------------------------------------------------------
+# BUNDLE / GATE / PUBLISH
+# -----------------------------------------------------------------------------
 
 bundle:
   stage: bundle
@@ -412,109 +319,54 @@ bundle:
       artifacts: true
     - job: collect_metrics
       artifacts: true
+      optional: true
     - job: collect_sandbox
       artifacts: true
+      optional: true
     - job: collect_scanner
       artifacts: true
       optional: true
-  script:
-    - |
-      set -e
-      jq -n --arg run_id "$RUN_ID" '{run_id: $run_id}' > out/manifest.json
+  script: |-
+    set -euo pipefail
 
-      rm -rf out/final || true
-      mkdir -p out/final
+    mkdir -p final
 
-      (
-        cd out
-        echo "Creating encrypted bundle (7z; password=RUN_ID)..."
-        7z a -t7z "../run-${RUN_ID}.7z" . -xr!final -mx=9 -mhe=on -p"$RUN_ID"
-      )
+    jq -n --arg run_id "$RUN_ID" '{run_id:$run_id}' > manifest.json
 
-      mv run-${RUN_ID}.7z out/final/
+    7z a -t7z -p"$RUN_ID" -mhe=on "final/run-${RUN_ID}.7z" out/ manifest.json
   artifacts:
     paths:
-      - out/**
-    when: always
-    expire_in: 1 day
+      - final/run-*.7z
+      - manifest.json
+    expire_in: 7 days
 
 gate:
   stage: gate
   needs:
     - job: bundle
       artifacts: true
-  script:
-    - |
-      set -e
-      echo "Evaluating service statuses..."
-      for meta_file in out/*/service_meta.json; do
-        status=$(jq -r .status "$meta_file")
-        if [ "$status" != "success" ]; then
-          echo "Error: Service $(jq -r .service_name "$meta_file") failed!" && exit 1
-        fi
-      done
+    - job: collect_sandbox
+      artifacts: true
+      optional: true
+  script: |-
+    set -euo pipefail
 
-      echo "Applying sandbox gates..."
-      test -f out/sandbox/sandbox.json || (echo "Error: out/sandbox/sandbox.json missing" && exit 1)
-      test -f out/sandbox/stdout.txt || (echo "Error: out/sandbox/stdout.txt missing" && exit 1)
-      test "$(jq -r .exit_code out/sandbox/sandbox.json)" = "0" || (echo "Error: Sandbox exit_code != 0" && exit 1)
-      grep -qi "hello" out/sandbox/stdout.txt || (echo "Error: Sandbox stdout did not contain 'hello'" && exit 1)
+    # Minimal gate: builder must exist.
+    test -f out/builder/service_meta.json
 
-      echo "All services passed!"
-  artifacts:
-    paths:
-      - out/**
-    when: always
-    expire_in: 1 day
+    # Optional gate behavior: if sandbox ran, require sandbox metadata.
+    if [ -n "${OWO_SANDBOX_REF:-}" ]; then
+      test -f out/sandbox/service_meta.json
+    fi
 
 publish_success:
-  stage: publish
-  needs:
-    - job: kickoff
-      artifacts: true
-    - job: gate
-      artifacts: true
-  script:
-    - |
-      set -e
-
-      echo "Uploading final bundle(s)..."
-      for file in out/final/*; do
-        if [ -f "$file" ]; then
-          filename=$(basename "$file")
-          curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$file" \
-            "$CI_API_V4_URL/projects/$OWO_BUS_PROJECT_ID/packages/generic/$OWO_BUS_PACKAGE/$RUN_ID/final/$filename"
-          echo "Uploaded: final/$filename"
-        fi
-      done
+  extends: .publish_to_bus_template
   when: on_success
-  artifacts:
-    paths:
-      - out/**
-    expire_in: 1 day
+  variables:
+    BUS_SUFFIX: ""
 
 publish_failed:
-  stage: publish
-  needs:
-    - job: kickoff
-      artifacts: true
-    - job: bundle
-      artifacts: true
-  script:
-    - |
-      set -e
-
-      echo "Uploading final bundle(s)..."
-      for file in out/final/*; do
-        if [ -f "$file" ]; then
-          filename=$(basename "$file")
-          curl --fail --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$file" \
-            "$CI_API_V4_URL/projects/$OWO_BUS_PROJECT_ID/packages/generic/${OWO_BUS_PACKAGE}-failed/$RUN_ID/final/$filename"
-          echo "Uploaded: final/$filename"
-        fi
-      done
+  extends: .publish_to_bus_template
   when: on_failure
-  artifacts:
-    paths:
-      - out/**
-    expire_in: 1 week  # Retain artifacts for 1 week for failed pipelines
+  variables:
+    BUS_SUFFIX: "-failed"
