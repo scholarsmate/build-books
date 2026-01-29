@@ -28,6 +28,24 @@
 # - This pipeline uses the GitLab API with CI_JOB_TOKEN for resolving downstream pipelines and downloading artifacts.
 # - Ensure the runner image includes: curl, jq, 7z, unzip, uuidgen.
 
+variables:
+  # No need to checkout the orchestrator code into the workspace
+  GIT_STRATEGY: none
+  
+  # Service projects (override in CI/CD variables if yours differ)
+  OWO_BUILDER_PROJECT: "owo/builder-hello"
+  OWO_METRICS_PROJECT: "owo/metrics-basic"
+  OWO_SANDBOX_PROJECT: "owo/sandbox-exec"
+  OWO_SCANNER_PROJECT: "owo/scanner-virustotal"
+
+  # Optional services default off (HTML/URL sets these per run)
+  OWO_METRICS_REF: ""
+  OWO_SANDBOX_REF: ""
+  OWO_SCANNER_REF: ""
+
+  # Standardized artifacts job name in ALL downstream pipelines
+  OWO_ARTIFACT_JOB_NAME: "^run$"
+
 include:
   - local: ci/templates.yml
 
@@ -45,22 +63,6 @@ default:
   before_script:
     - apk add --no-cache bash curl jq unzip p7zip util-linux coreutils
   variables:
-    GIT_STRATEGY: none
-
-variables:
-  # Service projects (override in CI/CD variables if yours differ)
-  OWO_BUILDER_PROJECT: "owo/builder-hello"
-  OWO_METRICS_PROJECT: "owo/metrics-basic"
-  OWO_SANDBOX_PROJECT: "owo/sandbox-exec"
-  OWO_SCANNER_PROJECT: "owo/scanner-virustotal"
-
-  # Optional services default off (HTML/URL sets these per run)
-  OWO_METRICS_REF: ""
-  OWO_SANDBOX_REF: ""
-  OWO_SCANNER_REF: ""
-
-  # Standardized artifacts job name in ALL downstream pipelines
-  OWO_ARTIFACT_JOB_NAME: "^run$"
 
 kickoff:
   stage: kickoff
