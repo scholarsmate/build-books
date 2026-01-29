@@ -25,6 +25,10 @@ die() {
   exit 1
 }
 
+warn() {
+  echo "WARNING: $*" >&2
+}
+
 # require_bin <name>
 #
 # Args:
@@ -49,12 +53,30 @@ require_bin() {
 #   Response body.
 #
 # Exit:
-#   Non-zero if HTTP request fails.
+#   Non-zero if HTTP request fails after retries.
 api_get() {
-  local url="${1:?url required}"
-  curl --fail --silent --show-error \
-    --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-    "$url"
+    local url="${1:?url required}"
+    local max_retries=5  # Maximum number of retries
+    local retry_delay=2  # Delay between retries (in seconds)
+    local attempt=0
+
+    while (( attempt < max_retries )); do
+        if curl --fail --silent --show-error \
+            --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+            "$url"; then
+            return 0  # Success
+        fi
+
+        attempt=$(( attempt + 1 ))
+        warn "Failed to fetch URL: $url (attempt $attempt/$max_retries)"
+
+        if (( attempt < max_retries )); then
+            echo "Retrying in $retry_delay seconds..." >&2
+            sleep "$retry_delay"
+        fi
+    done
+
+    die "ERROR: Failed to fetch URL: $url after $max_retries attempts"
 }
 
 # get_bridge_downstream <trigger_job_name>
@@ -140,16 +162,33 @@ find_artifacts_job_id() {
 #   (none)
 #
 # Exit:
-#   Non-zero if download fails.
+#   Non-zero if download fails after retries.
 download_job_artifacts_zip() {
-  local project_id="${1:?project_id required}"
-  local job_id="${2:?job_id required}"
-  local out_zip="${3:?out_zip_path required}"
+    local project_id="${1:?project_id required}"
+    local job_id="${2:?job_id required}"
+    local out_zip="${3:?out_zip_path required}"
+    local max_retries=5  # Maximum number of retries
+    local retry_delay=2  # Delay between retries (in seconds)
+    local attempt=0
 
-  curl --fail --silent --show-error \
-    --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-    "${CI_API_V4_URL}/projects/${project_id}/jobs/${job_id}/artifacts" \
-    -o "$out_zip"
+    while (( attempt < max_retries )); do
+        if curl --fail --silent --show-error \
+            --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+            "${CI_API_V4_URL}/projects/${project_id}/jobs/${job_id}/artifacts" \
+            -o "$out_zip"; then
+            return 0  # Success
+        fi
+
+        attempt=$(( attempt + 1 ))
+        warn "WARNING: Failed to download artifacts for project_id=$project_id, job_id=$job_id (attempt $attempt/$max_retries)"
+
+        if (( attempt < max_retries )); then
+            echo "Retrying in $retry_delay seconds..." >&2
+            sleep "$retry_delay"
+        fi
+    done
+
+    die "ERROR: Failed to download artifacts for project_id=$project_id, job_id=$job_id after $max_retries attempts"
 }
 
 # upload_generic_package_file <project_id> <package_name> <version> <file_path> <dest_name>
@@ -167,16 +206,33 @@ download_job_artifacts_zip() {
 #   (none)
 #
 # Exit:
-#   Non-zero if upload fails.
+#   Non-zero if upload fails after retries.
 upload_generic_package_file() {
-  local project_id="${1:?project_id required}"
-  local package_name="${2:?package_name required}"
-  local version="${3:?version required}"
-  local file_path="${4:?file_path required}"
-  local dest_name="${5:?dest_name required}"
+    local project_id="${1:?project_id required}"
+    local package_name="${2:?package_name required}"
+    local version="${3:?version required}"
+    local file_path="${4:?file_path required}"
+    local dest_name="${5:?dest_name required}"
+    local max_retries=5  # Maximum number of retries
+    local retry_delay=2  # Delay between retries (in seconds)
+    local attempt=0
 
-  curl --fail --silent --show-error \
-    --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-    --upload-file "$file_path" \
-    "${CI_API_V4_URL}/projects/${project_id}/packages/generic/${package_name}/${version}/${dest_name}"
+    while (( attempt < max_retries )); do
+        if curl --fail --silent --show-error \
+            --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+            --upload-file "$file_path" \
+            "${CI_API_V4_URL}/projects/${project_id}/packages/generic/${package_name}/${version}/${dest_name}"; then
+            return 0  # Success
+        fi
+
+        attempt=$(( attempt + 1 ))
+        warn "Failed to upload file=$file_path to project_id=$project_id, package=$package_name, version=$version (attempt $attempt/$max_retries)"
+
+        if (( attempt < max_retries )); then
+            echo "Retrying in $retry_delay seconds..." >&2
+            sleep "$retry_delay"
+        fi
+    done
+
+    die "ERROR: Failed to upload file=$file_path to project_id=$project_id, package=$package_name, version=$version after $max_retries attempts"
 }
