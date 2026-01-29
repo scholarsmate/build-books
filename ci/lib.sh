@@ -97,6 +97,7 @@ api_get() {
 # Exit:
 #   Non-zero if the bridge is not found or has no downstream pipeline.
 get_bridge_downstream() {
+  require_bin jq
   local trigger_job_name="${1:?trigger_job_name required}"
 
   local bridges_json
@@ -133,11 +134,10 @@ get_bridge_downstream() {
 # Exit:
 #   Non-zero if no matching job is found.
 find_artifacts_job_id() {
+  require_bin jq
   local project_id="${1:?project_id required}"
   local pipeline_id="${2:?pipeline_id required}"
   local job_name_regex="${3:?job_name_regex required}"
-
-  require_bin jq
 
   local jobs_json
   jobs_json="$(api_get "${CI_API_V4_URL}/projects/${project_id}/pipelines/${pipeline_id}/jobs?per_page=100")"
