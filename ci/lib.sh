@@ -62,6 +62,8 @@ api_get() {
     local url="${1:?url required}"
     local attempt=0
 
+    require_bin curl
+
     while (( attempt < MAX_RETRIES )); do
         if curl --fail --silent --show-error \
             --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
@@ -135,6 +137,8 @@ find_artifacts_job_id() {
   local pipeline_id="${2:?pipeline_id required}"
   local job_name_regex="${3:?job_name_regex required}"
 
+  require_bin jq
+
   local jobs_json
   jobs_json="$(api_get "${CI_API_V4_URL}/projects/${project_id}/pipelines/${pipeline_id}/jobs?per_page=100")"
 
@@ -170,6 +174,8 @@ download_job_artifacts_zip() {
     local job_id="${2:?job_id required}"
     local out_zip="${3:?out_zip_path required}"
     local attempt=0
+
+    require_bin curl
 
     while (( attempt < MAX_RETRIES )); do
         if curl --fail --silent --show-error \
@@ -214,6 +220,8 @@ upload_generic_package_file() {
     local file_path="${4:?file_path required}"
     local dest_name="${5:?dest_name required}"
     local attempt=0
+    
+    require_bin curl
 
     while (( attempt < MAX_RETRIES )); do
         if curl --fail --silent --show-error \
