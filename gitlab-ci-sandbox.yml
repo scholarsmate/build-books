@@ -54,7 +54,7 @@ sandbox:
 
       jq -n \
         --argjson exit_code "$exit_code" \
-        '{exit_code: $exit_code}' > out/sandbox.json
+        '{exit_code: $exit_code}' | tee out/sandbox.json
 
       echo "Execution complete. exit_code=$exit_code"
   artifacts:
@@ -87,7 +87,7 @@ publish_success:
           pipeline_url: $pipeline_url,
           run_id: $run_id,
           status: $status
-        }' > out/service_meta.json
+        }' | tee out/service_meta.json
 
       echo "Metadata published successfully."
   artifacts:
@@ -123,7 +123,7 @@ publish_failed:
           pipeline_url: $pipeline_url,
           run_id: $run_id,
           status: $status
-        }' > out/service_meta.json
+        }' | tee out/service_meta.json
 
       echo "Failure metadata published."
   artifacts:
