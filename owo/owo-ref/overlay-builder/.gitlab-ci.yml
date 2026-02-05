@@ -1,0 +1,148 @@
+# Builder CI pipeline
+#
+# This service overlay produces a build artifact and its hash, and exports them as job artifacts.
+# Outputs are written under out/* and include a mandatory out/service_meta.json.
+#
+# Required variables:
+# - RUN_ID
+#
+# Outputs (artifacts):
+# - out/exe.bin
+# - out/exe.sha256
+# - out/service_meta.json
+#
+# Notes:
+# - The orchestrator downloads these artifacts via the GitLab API.
+# - Ensure the runner image includes: sha256sum, jq.
+stages:
+  - build
+  - validate
+  - publish
+
+build:
+  stage: build
+  script:
+    - |
+      set -e
+      test -n "${RUN_ID:-}" || (echo "Error: RUN_ID is required" && exit 1)
+      mkdir -p out
+
+      echo "Building executable..."
+      
+      cat > out/exe.bin <<'EOF'
+      #!/usr/bin/env bash
+      set -e
+      echo "Hello, world!"
+      EOF
+      
+      chmod +x out/exe.bin
+      sha256sum out/exe.bin | awk '{print $1}' > out/exe.sha256
+      echo "Executable built successfully."
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "pipeline"
+  artifacts:
+    paths:
+      - out/**
+    when: always
+    expire_in: 1 day
+
+validate:
+  stage: validate
+  needs:
+    - job: build
+      artifacts: true
+  script:
+    - |
+      echo "Validating executable..."
+
+      test -f out/exe.bin || (echo "Error: Executable not found!" && exit 1)
+      test -f out/exe.sha256 || (echo "Error: SHA256 checksum not found!" && exit 1)
+
+      echo "Validation passed."
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "pipeline"
+  artifacts:
+    paths:
+      - out/**
+    when: always
+    expire_in: 1 day
+
+publish_success:
+  stage: publish
+  needs:
+    - job: validate
+      artifacts: true
+  when: on_success
+  script:
+    - |
+      echo "Publishing metadata..."
+
+      jq -n \
+        --arg service_name "Builder" \
+        --arg repository_url "$CI_PROJECT_URL" \
+        --arg commit_sha "$CI_COMMIT_SHA" \
+        --arg pipeline_url "$CI_PIPELINE_URL" \
+        --arg run_id "$RUN_ID" \
+        --arg built_file "exe.bin" \
+        --arg status "success" \
+        '{
+          service_name: $service_name,
+          repository_url: $repository_url,
+          commit_sha: $commit_sha,
+          pipeline_url: $pipeline_url,
+          run_id: $run_id,
+          built_file: $built_file,
+          status: $status
+        }' | tee out/service_meta.json
+
+      echo "Metadata published successfully."
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "pipeline"
+  artifacts:
+    paths:
+      - out/**
+    when: always
+    expire_in: 1 day
+
+publish_failed:
+  stage: publish
+  needs:
+    - job: build
+      artifacts: true
+      optional: true
+    - job: validate
+      artifacts: true
+      optional: true
+  when: on_failure
+  script:
+    - |
+      mkdir -p out
+
+      echo "Publishing failure metadata..."
+
+      jq -n \
+        --arg service_name "Builder" \
+        --arg repository_url "$CI_PROJECT_URL" \
+        --arg commit_sha "$CI_COMMIT_SHA" \
+        --arg pipeline_url "$CI_PIPELINE_URL" \
+        --arg run_id "$RUN_ID" \
+        --arg built_file "exe.bin" \
+        --arg status "failed" \
+        '{
+          service_name: $service_name,
+          repository_url: $repository_url,
+          commit_sha: $commit_sha,
+          pipeline_url: $pipeline_url,
+          run_id: $run_id,
+          built_file: $built_file,
+          status: $status
+        }' | tee out/service_meta.json
+
+      echo "Failure metadata published."
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "pipeline"
+  artifacts:
+    paths:
+      - out/**
+    when: always
+    expire_in: 1 day
