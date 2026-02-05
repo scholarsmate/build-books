@@ -1,0 +1,76 @@
+# ci/templates.yml
+#
+# Shared job templates for the orchestrator pipeline.
+# Keep this file boring, stable, and reusable.
+
+.resolve_downstream_template:
+  stage: resolve
+  needs:
+    - job: kickoff
+      artifacts: true
+  script: 
+    - bash -lc |
+      set -euo pipefail
+      . ci/lib.sh
+
+      read -r DS_PROJECT_ID DS_PIPELINE_ID < <(get_bridge_downstream "$TRIGGER_JOB_NAME")
+      DS_JOB_ID="$(find_artifacts_job_id "$DS_PROJECT_ID" "$DS_PIPELINE_ID" "$OWO_ARTIFACT_JOB_NAME")"
+
+      {
+        echo "${PREFIX}_PROJECT_ID=$DS_PROJECT_ID";
+        echo "${PREFIX}_PIPELINE_ID=$DS_PIPELINE_ID";
+        echo "${PREFIX}_JOB_ID=$DS_JOB_ID";
+      } | tee "${PREFIX,,}.env"
+  
+  artifacts:
+    reports:
+      dotenv: "${PREFIX,,}.env"
+    expire_in: 1 day
+
+.collect_template:
+  stage: collect
+  needs:
+    - job: kickoff
+      artifacts: true
+  script: |-
+    set -euo pipefail
+    . ci/lib.sh
+    require_bin unzip
+
+    mkdir -p "tmp/$SERVICE" "out/$SERVICE"
+
+    echo "Downloading artifacts for service='$SERVICE' project_id='$PROJECT_ID' job_id='$JOB_ID'..."
+    download_job_artifacts_zip "$PROJECT_ID" "$JOB_ID" "tmp/$SERVICE/${SERVICE}.zip"
+
+    unzip -q "tmp/$SERVICE/${SERVICE}.zip" -d "tmp/$SERVICE/unzipped"
+    test -f "tmp/$SERVICE/unzipped/out/service_meta.json"
+    mv "tmp/$SERVICE/unzipped/out/"* "out/$SERVICE/"
+  
+  artifacts:
+    paths:
+      - out/
+    when: always
+    expire_in: 1 day
+
+.publish_to_bus_template:
+  stage: publish
+  needs:
+    - job: bundle
+      artifacts: true
+  script: |-
+    set -euo pipefail
+    . ci/lib.sh
+
+    : "${OWO_BUS_PROJECT_ID:?OWO_BUS_PROJECT_ID missing (should come from kickoff dotenv)}"
+    : "${BUS_PACKAGE_NAME:?BUS_PACKAGE_NAME missing}"
+    : "${RUN_ID:?RUN_ID missing}"
+
+    echo "Publishing: project=$OWO_BUS_PROJECT_ID package=$BUS_PACKAGE_NAME version=$RUN_ID"
+
+    upload_generic_package_file \
+      "$OWO_BUS_PROJECT_ID" "$BUS_PACKAGE_NAME" "$RUN_ID" \
+      "final/run-${RUN_ID}.7z" "run-${RUN_ID}.7z"
+
+    upload_generic_package_file \
+      "$OWO_BUS_PROJECT_ID" "$BUS_PACKAGE_NAME" "$RUN_ID" \
+      "manifest.json" "manifest.json"

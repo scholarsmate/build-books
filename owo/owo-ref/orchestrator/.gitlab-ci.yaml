@@ -1,0 +1,444 @@
+# .gitlab-ci.yml
+#
+# Orchestrator CI pipeline (reference implementation)
+#
+# This pipeline defines the workflow DAG and serves as the single marshaler and publisher.
+# It triggers service overlay pipelines, resolves their downstream artifact-producing jobs,
+# downloads artifacts via the GitLab API, bundles outputs, applies gate logic, and publishes
+# a final run bundle to the bus (Generic Package Registry).
+#
+# Required variables:
+# - OWO_BUS_PROJECT_ID (numeric GitLab project id that hosts the bus package registry)
+# - OWO_BUS_PACKAGE (generic package name, e.g. "owo-runs")
+#
+# Optional services (metrics/sandbox/scanner) are controlled by *_REF:
+# - If OWO_<SERVICE>_REF is empty, that service is skipped.
+# - VT_TIMEOUT_SECONDS (optional) passed to the scanner overlay
+# - VT_POLL_INTERVAL_SECONDS (optional) passed to the scanner overlay
+# - Bundle is always encrypted with RUN_ID (lightweight friction; not a security control)
+#
+# Generated variables:
+# - RUN_ID (UUID) generated at kickoff and propagated to services
+#
+# Standardized overlay contract:
+# - Downstream pipelines MUST produce artifacts from a job named exactly "run"
+#   containing at least: out/service_meta.json
+#
+# Notes:
+# - This pipeline uses the GitLab API with CI_JOB_TOKEN for resolving downstream pipelines and downloading artifacts.
+# - Ensure the runner image includes: curl, jq, 7z, unzip, uuidgen.
+
+variables:
+  GIT_STRATEGY: fetch
+
+  OWO_BUS_PROJECT_PATH: "owo/owo-ref/bus-prod"   # override in CI/CD vars per env
+  OWO_BUS_PACKAGE: "owo-runs"                            # override per env/run
+
+  # Subgroup-level variables:
+  # - OWO_BUS_PROD_ID=17
+  # - OWO_BUS_PROD_FAILED_ID=18
+  OWO_BUS_PROJECT_ID: "$OWO_BUS_PROD_ID"
+  OWO_BUS_PROJECT_ID_FAILED: "$OWO_BUS_PROD_FAILED_ID"
+
+  # Service projects (override in CI/CD variables if yours differ)
+  OWO_BUILDER_PROJECT: "owo/owo-ref/overlay-builder"
+  OWO_METRICS_PROJECT: "owo/owo-ref/overlay-metrics"
+  OWO_SANDBOX_PROJECT: "owo/owo-ref/overlay-sandbox"
+  OWO_SCANNER_PROJECT: "owo/owo-ref/overlay-scanner"
+
+  OWO_BUILDER_REF: "main"
+  
+  # Optional services default off (HTML/URL sets these per run)
+  OWO_METRICS_REF: ""
+  OWO_SANDBOX_REF: ""
+  OWO_SCANNER_REF: ""
+
+  # Standardized artifacts job name in ALL downstream pipelines
+  OWO_ARTIFACT_JOB_NAME: "^run$"
+
+default:
+  tags: [owo]
+  image: ${CI_REGISTRY}/owo/owo-ref/ci-images/toolbox:1.0.0
+  before_script:
+    - bash -lc 'set -euo pipefail; echo "bash enforced"'
+
+include:
+  - local: ci/templates.yml
+
+stages:
+  - probe
+  - kickoff
+  - trigger
+  - resolve
+  - collect
+  - bundle
+  - gate
+  - publish
+
+probe_entrypoint:
+  stage: probe
+  script: |-
+    echo "comm: $(ps -p $$ -o comm=)"
+    echo "args: $(ps -p $$ -o args=)"
+    command -v bash || (echo "NO BASH" && exit 1)
+    ls -l /bin/sh /bin/bash || true
+    /bin/bash -lc 'echo "bash runs"; for i in 1 2; do echo $i; done'
+    curl -sS --header "JOB-TOKEN: $CI_JOB_TOKEN" "$CI_API_V4_URL/version"
+
+probe_builder_access:
+  stage: probe
+  script: |-
+    set -euo pipefail
+    . ci/lib.sh
+
+    bus_path="owo/owo-ref/overlay-builder"
+    enc="$(url_encode "${bus_path}")"
+
+    echo "OWO_BUILDER_PROJECT=${OWO_BUILDER_PROJECT:-<unset>}"
+    echo "OWO_BUILDER_REF=${OWO_BUILDER_REF:-<unset>}"
+    echo "CI_PROJECT_PATH=${CI_PROJECT_PATH:-<unset>}"
+
+    echo "CI_API_V4_URL=${CI_API_V4_URL}"
+    echo "GET ${CI_API_V4_URL}/projects/${enc}"
+
+    curl -sS -i --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+      "${CI_API_V4_URL}/projects/${enc}" | sed -n '1,30p'
+
+    echo "Self project:"
+    curl -sS --fail --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+      "$CI_API_V4_URL/projects/$CI_PROJECT_ID" | jq -r '.path_with_namespace'
+
+    echo "Builder by path:"
+    curl -sS --fail --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+      "$CI_API_V4_URL/projects/owo%2Fowo-ref%2Foverlay-builder" | sed -n '1,20p'
+
+    echo "Builder by numeric id (if known):"
+    curl -sS --fail --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+      "$CI_API_V4_URL/projects/<BUILDER_ID>" | sed -n '1,20p'
+
+kickoff:
+  stage: kickoff
+  script: |-
+    bash -lc '
+    set -euo pipefail
+    . ci/lib.sh
+
+    echo "$OWO_BUS_PROJECT_ID" | grep -Eq '^[0-9]+$' || die "OWO_BUS_PROJECT_ID must be numeric"
+    echo "$OWO_BUS_PROJECT_ID_FAILED" | grep -Eq '^[0-9]+$' || die "OWO_BUS_PROJECT_ID_FAILED must be numeric"
+
+    # Required operator-facing vars
+    : "${OWO_BUS_PACKAGE:?OWO_BUS_PACKAGE is required (e.g. owo-runs)}"
+
+    # Domain policy defaults
+    if [[ -z "${OWO_BUS_PACKAGE_FAILED:-}" ]]; then
+      OWO_BUS_PACKAGE_FAILED="${OWO_BUS_PACKAGE}-failed"
+    fi
+
+    # Generate run id if missing
+    if [[ -z "${RUN_ID:-}" ]]; then
+      RUN_ID="$(uuidgen)"
+    fi
+
+    # Normalize refs
+    : "${OWO_BUILDER_REF:=main}"
+    : "${OWO_METRICS_REF:=}"
+    : "${OWO_SANDBOX_REF:=}"
+    : "${OWO_SCANNER_REF:=}"
+
+    {
+      echo "RUN_ID=$RUN_ID"
+      echo "OWO_BUS_PROJECT_ID=$OWO_BUS_PROJECT_ID"
+      echo "OWO_BUS_PROJECT_ID_FAILED=$OWO_BUS_PROJECT_ID_FAILED"
+      echo "OWO_BUS_PACKAGE=$OWO_BUS_PACKAGE"
+      echo "OWO_BUS_PACKAGE_FAILED=$OWO_BUS_PACKAGE_FAILED"
+
+      echo "OWO_BUILDER_REF=$OWO_BUILDER_REF"
+      echo "OWO_METRICS_REF=$OWO_METRICS_REF"
+      echo "OWO_SANDBOX_REF=$OWO_SANDBOX_REF"
+      echo "OWO_SCANNER_REF=$OWO_SCANNER_REF"
+    } | tee run.env
+    '
+  artifacts:
+    reports:
+      dotenv: run.env
+    expire_in: 1 day
+
+# -----------------------------------------------------------------------------
+# TRIGGER STAGE
+# -----------------------------------------------------------------------------
+
+trigger_builder:
+  stage: trigger
+  needs:
+    - job: kickoff
+      artifacts: true
+  trigger:
+    project: "$OWO_BUILDER_PROJECT"
+    branch: "$OWO_BUILDER_REF"
+    strategy: depend
+  variables:
+    RUN_ID: "$RUN_ID"
+    OWO_BUS_PROJECT_ID: "$OWO_BUS_PROJECT_ID"
+    OWO_BUS_PACKAGE: "$OWO_BUS_PACKAGE"
+  allow_failure: false
+
+# Builder resolve MUST be in stage=trigger so optional downstream triggers can legally needs it.
+resolve_builder:
+  extends: .resolve_downstream_template
+  stage: trigger
+  needs:
+    - job: kickoff
+      artifacts: true
+    - job: trigger_builder
+  variables:
+    TRIGGER_JOB_NAME: "trigger_builder"
+    PREFIX: "BUILDER"
+
+trigger_metrics:
+  stage: trigger
+  needs:
+    - job: kickoff
+      artifacts: true
+    - job: resolve_builder
+      artifacts: true
+  rules:
+    - if: '$OWO_METRICS_REF'
+      when: on_success
+    - when: never
+  trigger:
+    project: "$OWO_METRICS_PROJECT"
+    branch: "$OWO_METRICS_REF"
+    strategy: depend
+  variables:
+    RUN_ID: "$RUN_ID"
+    BUILDER_PROJECT_ID: "$BUILDER_PROJECT_ID"
+    BUILDER_JOB_ID: "$BUILDER_JOB_ID"
+
+trigger_sandbox:
+  stage: trigger
+  needs:
+    - job: kickoff
+      artifacts: true
+    - job: resolve_builder
+      artifacts: true
+  rules:
+    - if: '$OWO_SANDBOX_REF'
+      when: on_success
+    - when: never
+  trigger:
+    project: "$OWO_SANDBOX_PROJECT"
+    branch: "$OWO_SANDBOX_REF"
+    strategy: depend
+  variables:
+    RUN_ID: "$RUN_ID"
+    BUILDER_PROJECT_ID: "$BUILDER_PROJECT_ID"
+    BUILDER_JOB_ID: "$BUILDER_JOB_ID"
+
+trigger_scanner:
+  stage: trigger
+  needs:
+    - job: kickoff
+      artifacts: true
+    - job: resolve_builder
+      artifacts: true
+  rules:
+    - if: '$OWO_SCANNER_REF'
+      when: on_success
+    - when: never
+  trigger:
+    project: "$OWO_SCANNER_PROJECT"
+    branch: "$OWO_SCANNER_REF"
+    strategy: depend
+  variables:
+    RUN_ID: "$RUN_ID"
+    BUILDER_PROJECT_ID: "$BUILDER_PROJECT_ID"
+    BUILDER_JOB_ID: "$BUILDER_JOB_ID"
+    VT_TIMEOUT_SECONDS: "$VT_TIMEOUT_SECONDS"
+    VT_POLL_INTERVAL_SECONDS: "$VT_POLL_INTERVAL_SECONDS"
+
+# -----------------------------------------------------------------------------
+# RESOLVE STAGE (optional services)
+# -----------------------------------------------------------------------------
+
+resolve_metrics:
+  extends: .resolve_downstream_template
+  needs:
+    - job: kickoff
+      artifacts: true
+    - job: trigger_metrics
+      optional: true
+  rules:
+    - if: '$OWO_METRICS_REF'
+      when: on_success
+    - when: never
+  variables:
+    TRIGGER_JOB_NAME: "trigger_metrics"
+    PREFIX: "METRICS"
+
+resolve_sandbox:
+  extends: .resolve_downstream_template
+  needs:
+    - job: kickoff
+      artifacts: true
+    - job: trigger_sandbox
+      optional: true
+  rules:
+    - if: '$OWO_SANDBOX_REF'
+      when: on_success
+    - when: never
+  variables:
+    TRIGGER_JOB_NAME: "trigger_sandbox"
+    PREFIX: "SANDBOX"
+
+resolve_scanner:
+  extends: .resolve_downstream_template
+  needs:
+    - job: kickoff
+      artifacts: true
+    - job: trigger_scanner
+      optional: true
+  rules:
+    - if: '$OWO_SCANNER_REF'
+      when: on_success
+    - when: never
+  variables:
+    TRIGGER_JOB_NAME: "trigger_scanner"
+    PREFIX: "SCANNER"
+
+# -----------------------------------------------------------------------------
+# COLLECT STAGE
+# -----------------------------------------------------------------------------
+
+collect_builder:
+  extends: .collect_template
+  needs:
+    - job: kickoff
+      artifacts: true
+    - job: resolve_builder
+      artifacts: true
+  variables:
+    SERVICE: "builder"
+    PROJECT_ID: "$BUILDER_PROJECT_ID"
+    JOB_ID: "$BUILDER_JOB_ID"
+
+collect_metrics:
+  extends: .collect_template
+  needs:
+    - job: kickoff
+      artifacts: true
+    - job: resolve_metrics
+      artifacts: true
+      optional: true
+  rules:
+    - if: '$OWO_METRICS_REF'
+      when: on_success
+    - when: never
+  variables:
+    SERVICE: "metrics"
+    PROJECT_ID: "$METRICS_PROJECT_ID"
+    JOB_ID: "$METRICS_JOB_ID"
+
+collect_sandbox:
+  extends: .collect_template
+  needs:
+    - job: kickoff
+      artifacts: true
+    - job: resolve_sandbox
+      artifacts: true
+      optional: true
+  rules:
+    - if: '$OWO_SANDBOX_REF'
+      when: on_success
+    - when: never
+  variables:
+    SERVICE: "sandbox"
+    PROJECT_ID: "$SANDBOX_PROJECT_ID"
+    JOB_ID: "$SANDBOX_JOB_ID"
+
+collect_scanner:
+  extends: .collect_template
+  needs:
+    - job: kickoff
+      artifacts: true
+    - job: resolve_scanner
+      artifacts: true
+      optional: true
+  rules:
+    - if: '$OWO_SCANNER_REF'
+      when: on_success
+    - when: never
+  variables:
+    SERVICE: "scanner"
+    PROJECT_ID: "$SCANNER_PROJECT_ID"
+    JOB_ID: "$SCANNER_JOB_ID"
+
+# -----------------------------------------------------------------------------
+# BUNDLE / GATE / PUBLISH
+# -----------------------------------------------------------------------------
+
+bundle:
+  stage: bundle
+  needs:
+    - job: kickoff
+      artifacts: true
+    - job: collect_builder
+      artifacts: true
+    - job: collect_metrics
+      artifacts: true
+      optional: true
+    - job: collect_sandbox
+      artifacts: true
+      optional: true
+    - job: collect_scanner
+      artifacts: true
+      optional: true
+  script: |-
+    bash -lc '
+    set -euo pipefail
+    mkdir -p final
+    jq -n --arg run_id "${RUN_ID}" '{run_id:$run_id}' | tee manifest.json
+    7z a -t7z -p"${RUN_ID}" -mhe=on "final/run-${RUN_ID}.7z" out/ manifest.json
+    '
+  artifacts:
+    paths:
+      - final/run-*.7z
+      - manifest.json
+    expire_in: 7 days
+
+gate:
+  stage: gate
+  needs:
+    - job: bundle
+      artifacts: true
+    - job: collect_sandbox
+      artifacts: true
+      optional: true
+  script: |-
+    bash -lc '
+    set -euo pipefail
+    test -f out/builder/service_meta.json
+    if [[ -n "${OWO_METRICS_REF:-}" ]]; then
+      test -f out/metrics/service_meta.json
+    fi
+    if [[ -n "${OWO_SCANNER_REF:-}" ]]; then
+      test -f out/scanner/service_meta.json
+    fi
+    if [[ -n "${OWO_SANDBOX_REF:-}" ]]; then
+      test -f out/sandbox/service_meta.json
+    fi
+    '
+publish_success:
+  extends: .publish_to_bus_template
+  when: on_success
+  variables:
+    BUS_SUFFIX: ""
+    BUS_PROJECT_ID: "$OWO_BUS_PROJECT_ID"
+    BUS_PACKAGE: "$OWO_BUS_PACKAGE"
+
+publish_failed:
+  extends: .publish_to_bus_template
+  when: on_failure
+  variables:
+    BUS_SUFFIX: "-failed"
+    BUS_PROJECT_ID: "$OWO_BUS_PROJECT_ID_FAILED"
+    BUS_PACKAGE: "${OWO_BUS_PACKAGE}-failed"
