@@ -1,0 +1,62 @@
+stages:
+  - build
+
+build_toolbox_image:
+  stage: build
+  tags: [argh]              # match your runner tags
+  image: docker:29
+  services:
+    - name: docker:29-dind
+      alias: docker
+      command: 
+        - "--host=tcp://0.0.0.0:2375"
+        - "--insecure-registry=10.90.113.108:80"
+        - "--insecure-registry=10.90.113.108:5005"
+  variables:
+    DOCKER_TLS_CERTDIR: ""  # disable TLS so docker client can talk to dind easily
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_DRIVER: overlay2
+    NO_PROXY: "docker,10.90.113.108,localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    no_proxy: "docker,10.90.113.108,localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+  before_script:
+    - docker info | sed -n '/Insecure Registries:/,/Live Restore/p'
+    # Login for pulling base images via Dependency Proxy (port 80)
+    - echo "${CI_DEPENDENCY_PROXY_PASSWORD}" | docker login "${CI_DEPENDENCY_PROXY_SERVER}" -u "${CI_DEPENDENCY_PROXY_USER}" --password-stdin
+    # Login for pushing to Container Registry (port 5005)
+    - echo "${CI_REGISTRY_PASSWORD}" | docker login "${CI_REGISTRY}" -u "${CI_REGISTRY_USER}" --password-stdin
+
+  script: |-
+    set -eu
+    (set -o pipefail) 2>/dev/null || true
+
+
+    IMAGE="${CI_REGISTRY_IMAGE}/toolbox"
+    BASE_IMAGE="${CI_REGISTRY}/argonghost/argh-ref/ci-images/ubuntu:24.04"
+
+    echo "CI_REGISTRY=${CI_REGISTRY}"
+    echo "CI_REGISTRY_IMAGE=${CI_REGISTRY_IMAGE}"
+    echo "BASE_IMAGE=${BASE_IMAGE}"
+    docker pull "${BASE_IMAGE}"
+
+    cd toolbox && docker build \
+      -f Dockerfile \
+      --pull=false \
+      --build-arg BASE_IMAGE="${BASE_IMAGE}" \
+      --build-arg HTTP_PROXY="${HTTP_PROXY:-}" \
+      --build-arg HTTPS_PROXY="${HTTPS_PROXY:-}" \
+      --build-arg NO_PROXY="${NO_PROXY:-}" \
+      -t "${IMAGE}:${CI_COMMIT_SHA}" \
+      -t "${IMAGE}:${CI_COMMIT_REF_SLUG}" \
+      -t "${IMAGE}:1.0.0" \
+      -t "${IMAGE}:stable" \
+      . && cd ..
+
+    echo "Pushing tags"
+    docker push "${IMAGE}:${CI_COMMIT_SHA}"
+    docker push "${IMAGE}:${CI_COMMIT_REF_SLUG}"
+    docker push "${IMAGE}:1.0.0"
+    docker push "${IMAGE}:stable"
+
+  rules:
+    - if: $CI_COMMIT_BRANCH   # branches
+    - if: $CI_COMMIT_TAG      # tags
